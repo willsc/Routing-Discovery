@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "route-discovery"
+version = "0.2.0"
+description = "Health-driven routing and a self-hosted BGP-to-VPC route server"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+aws = ["boto3>=1.35,<2"]
+
+[project.scripts]
+route-discovery = "route_discovery.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["route_discovery*"]

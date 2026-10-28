@@ -1,0 +1,41 @@
+# One active writer per AWS route table. The daemon never creates AWS infrastructure.
+[daemon]
+local_asn = 65000
+state_dir = "/var/lib/route-discovery"
+reconcile_interval = 5.0
+
+[backend]
+kind = "aws"
+region = "eu-west-2"
+route_table_id = "rtb-0123456789abcdef0"
+owner_tag = "route-discovery"
+owner_value = "managed"
+
+[health]
+interval = 1.0
+timeout = 0.3
+failures = 3
+successes = 5
+failback_delay = 30.0
+
+[[routes]]
+prefix = "10.20.0.0/16"
+all_down = "retain"
+
+[[routes.candidates]]
+id = "appliance-a"
+aws_target = "eni-0123456789abcdef0"
+local_pref = 200
+[[routes.candidates.probes]]
+host = "10.0.10.100"
+port = 8443
+external_path = "Dedicated end-to-end probe endpoint routed ONLY through appliance A; not its management port"
+
+[[routes.candidates]]
+id = "appliance-b"
+aws_target = "eni-0fedcba9876543210"
+local_pref = 100
+[[routes.candidates.probes]]
+host = "10.0.20.100"
+port = 8443
+external_path = "Dedicated end-to-end probe endpoint routed ONLY through appliance B; not its management port"

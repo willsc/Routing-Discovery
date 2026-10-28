@@ -1,0 +1,60 @@
+# Example overlay: wg-a/wg-b are independently routed WireGuard tunnel devices.
+# EC2's VPC fabric does not behave like an Ethernet LAN with arbitrary next hops.
+[daemon]
+local_asn = 65000
+state_dir = "/var/lib/route-discovery"
+listen = "127.0.0.1"
+port = 9808
+reconcile_interval = 0.5
+
+[backend]
+kind = "linux"
+table = 254
+protocol = 196
+metric = 100
+
+[health]
+interval = 1.0
+timeout = 0.3
+failures = 3
+successes = 3
+failback_delay = 10.0
+stale_after = 5.0
+dampening_half_life = 30.0
+dampening_penalty = 1000.0
+dampening_suppress = 2500.0
+dampening_reuse = 750.0
+dampening_max = 120.0
+
+[[routes]]
+prefix = "10.20.0.0/16"
+max_paths = 1
+preempt = true
+# Prevent traffic leaking through a less-specific/default route if both paths fail.
+all_down = "unreachable"
+
+[[routes.candidates]]
+id = "az-a"
+device = "wg-a"
+local_pref = 200
+as_path = [65100]
+med = 10
+cost = 10
+quorum = 1
+[[routes.candidates.probes]]
+host = "10.20.0.10"
+port = 443
+mark = 10101
+
+[[routes.candidates]]
+id = "az-b"
+device = "wg-b"
+local_pref = 100
+as_path = [65200]
+med = 20
+cost = 20
+quorum = 1
+[[routes.candidates.probes]]
+host = "10.20.0.10"
+port = 443
+mark = 10102

@@ -1,0 +1,37 @@
+[daemon]
+local_asn = 65010
+state_dir = "/var/lib/route-discovery"
+reconcile_interval = 1.0
+
+[backend]
+kind = "frr"
+frr_tag = 42420
+
+[health]
+interval = 1.0
+timeout = 0.3
+failures = 3
+successes = 3
+failback_delay = 10.0
+
+[[routes]]
+prefix = "10.20.0.0/16"
+all_down = "withdraw"
+
+[[routes.candidates]]
+id = "upstream-a"
+device = "wg-a"
+local_pref = 200
+[[routes.candidates.probes]]
+host = "10.20.0.10"
+port = 443
+mark = 10201
+
+[[routes.candidates]]
+id = "upstream-b"
+device = "wg-b"
+local_pref = 100
+[[routes.candidates.probes]]
+host = "10.20.0.10"
+port = 443
+mark = 10202
