@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DiscoverPeeringsReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeRouteServerPeers",
+        "ec2:DescribeRouteServers",
+        "ec2:DescribeTransitGatewayConnectPeers",
+        "ec2:DescribeNetworkInterfaces"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

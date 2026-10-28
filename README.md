@@ -6,6 +6,10 @@ Implemented in Rust as a single static-ish binary (`route-discovery`) built on T
 
 Version 0.2 also includes a **BGP-to-VPC route-server mode**: learn paths dynamically from multiple FRR endpoints/peers, compute a RIB/FIB, and propagate selections into multiple AWS route tables with durable ownership and withdrawal tracking. See [the route-server guide](docs/route-server.md) and [example configuration](examples/route-server.toml). Try `route-discovery server demo`. The modes below remain available for appliance and host health-driven routing.
 
+**Zero-configuration BGP to AWS** (`route-discovery bgp run --apply`) needs no configuration file either. It reads the instance from IMDS and finds the VPC Route Server and Transit Gateway Connect peers that name its ENIs. It builds the Connect GRE tunnels and announces the instance's service VIPs through FRR bgpd. AWS then carries the routes to VPC route tables, other VPCs, VPN and Direct Connect. See [the BGP guide](docs/bgp.md).
+
+**Zero-configuration mesh** (`route-discovery mesh run --apply`) needs no configuration file. It discovers every eligible NIC, publishes the host's connected subnets through FRR babeld, and lets Babel build a self-healing multipath mesh between hosts. Container and bridge subnets are withheld automatically. Run `route-discovery mesh inventory` to see what a host would publish. See [the mesh guide](docs/mesh.md), including its security and cloud-overlay caveats.
+
 ## Choose the routing plane
 
 | Backend | What changes | Best fit |

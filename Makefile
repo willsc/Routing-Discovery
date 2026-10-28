@@ -13,6 +13,7 @@ validate: build
 	$(BIN) validate -c examples/aws.toml
 	$(BIN) validate -c examples/frr.toml
 	$(BIN) server validate -c examples/route-server.toml
+	$(BIN) mesh render-frr > /dev/null
 
 demo: build
 	$(BIN) demo

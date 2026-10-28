@@ -19,7 +19,7 @@ aws-sdk-ec2 = { version = "1", optional = true, default-features = false, featur
 clap = { version = "4", features = ["derive"] }
 fastrand = "2"
 futures = "0.3"
-ipnet = "2"
+ipnet = { version = "2", features = ["serde"] }
 libc = "0.2"
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

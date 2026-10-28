@@ -1,0 +1,37 @@
+[Unit]
+Description=Zero-configuration BGP to AWS (VPC Route Server, Transit Gateway Connect)
+Wants=network-online.target frr.service
+After=network-online.target frr.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=180
+User=route-discovery
+Group=route-discovery
+SupplementaryGroups=frrvty frr
+# GRE tunnels for Transit Gateway Connect.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+StateDirectory=route-discovery-bgp
+StateDirectoryMode=0750
+# frr-reload.py logs here.
+ReadWritePaths=/var/log/frr
+ExecStart=/usr/local/bin/route-discovery bgp run --apply
+Restart=on-failure
+RestartSec=5
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target
