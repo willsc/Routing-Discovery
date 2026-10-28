@@ -69,6 +69,8 @@ pub trait Peering: Send + Sync {
     /// Returns the new peer's ID.
     async fn create_route_server_peer(&self, request: &PeerRequest) -> Result<String>;
     async fn delete_route_server_peer(&self, id: &str) -> Result<()>;
+    /// State name by instance ID; instances EC2 no longer reports are absent.
+    async fn instance_states(&self, ids: &[String]) -> Result<BTreeMap<String, String>>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -395,6 +397,27 @@ mod sdk {
         async fn delete_route_server_peer(&self, id: &str) -> Result<()> {
             self.client.delete_route_server_peer().route_server_peer_id(id).send().await.map_err(api)?;
             Ok(())
+        }
+
+        async fn instance_states(&self, ids: &[String]) -> Result<BTreeMap<String, String>> {
+            use aws_sdk_ec2::types::Filter;
+            if ids.is_empty() {
+                return Ok(BTreeMap::new());
+            }
+            let mut states = BTreeMap::new();
+            // A filter, unlike InstanceIds, does not fail the whole call when one ID no longer exists.
+            for chunk in ids.chunks(200) {
+                let filter = Filter::builder().name("instance-id").set_values(Some(chunk.to_vec())).build();
+                let mut pages = self.client.describe_instances().filters(filter).into_paginator().send();
+                while let Some(page) = pages.next().await {
+                    for instance in page.map_err(api)?.reservations().iter().flat_map(|r| r.instances()) {
+                        if let (Some(id), Some(state)) = (instance.instance_id(), instance.state().and_then(|s| s.name())) {
+                            states.insert(id.to_string(), state.as_str().to_string());
+                        }
+                    }
+                }
+            }
+            Ok(states)
         }
     }
 }

@@ -37,6 +37,8 @@ use metadata::{Host, Metadata};
 
 /// A reload is repeated at least this often, so manual bgpd edits are reverted.
 const DRIFT_RELOAD: f64 = 300.0;
+/// Seconds a peer must stay orphaned before the sweep deletes it.
+pub const SWEEP_GRACE: f64 = 300.0;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -51,6 +53,8 @@ pub struct Options {
     pub apply: bool,
     /// Create this instance's Route Server peers; None leaves peering resources to IaC.
     pub register: Option<registration::Registration>,
+    /// Delete tagged Route Server peers whose owner instance has terminated.
+    pub sweep: bool,
 }
 
 /// Everything one pass decided, before any change is made.
@@ -63,6 +67,7 @@ pub struct Observation {
     pub gated: BTreeMap<IpAddr, String>,
     pub tunnel_commands: Vec<Vec<String>>,
     pub registration: registration::Changes,
+    pub orphans: Vec<registration::Orphan>,
     pub config: String,
 }
 
@@ -84,6 +89,8 @@ pub struct Controller {
     status: Mutex<Status>,
     /// Last configuration bgpd accepted, and when.
     applied: Mutex<Option<(String, f64)>>,
+    /// When each orphaned peer was first observed.
+    orphaned_since: Mutex<BTreeMap<String, f64>>,
 }
 
 async fn pause(stop: &CancellationToken, seconds: f64) {
@@ -107,6 +114,7 @@ impl Controller {
             runner,
             status: Mutex::new(Status::default()),
             applied: Mutex::new(None),
+            orphaned_since: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -130,6 +138,12 @@ impl Controller {
         let registration = match &self.options.register {
             Some(r) => registration::plan(&host, &endpoints, &peers, &asns, r),
             None => registration::Changes::default(),
+        };
+        let orphans = if self.options.sweep {
+            let states = self.aws.instance_states(&registration::owners(&host, &peers)).await?;
+            registration::orphans(&host, &peers, &states)
+        } else {
+            vec![]
         };
         let interfaces = json_of(&self.runner.run(&argv(["ip", "-d", "-json", "addr", "show"]), 3.0).await?, "ip addr")?;
         let announcements = advertise::select(&interfaces, &self.options.filter, &host)?;
@@ -159,7 +173,7 @@ impl Controller {
             policy: &self.options.policy,
         });
         let tunnel_commands = gre::plan(&discovered.tunnels, &gre::parse(&interfaces)?);
-        Ok(Observation { host: Some(host), discovered, announcements, gated, tunnel_commands, registration, config })
+        Ok(Observation { host: Some(host), discovered, announcements, gated, tunnel_commands, registration, orphans, config })
     }
 
     fn config_path(&self) -> PathBuf {
@@ -226,6 +240,28 @@ impl Controller {
         Ok(changes.is_empty())
     }
 
+    /// Delete peers orphaned for at least SWEEP_GRACE. Failures are reported, not fatal: another
+    /// instance may be deleting the same peer, and the next pass retries.
+    pub async fn sweep(&self, observation: &Observation, now: f64) -> Vec<String> {
+        let due = registration::due(&mut self.orphaned_since.lock().unwrap(), &observation.orphans, now, SWEEP_GRACE);
+        let mut errors = vec![];
+        for id in due {
+            let orphan = observation.orphans.iter().find(|o| o.peer == id).unwrap();
+            if !self.options.apply {
+                info!("dry_run_sweep peer={id} owner={} reason={}", orphan.owner, orphan.reason);
+                continue;
+            }
+            match self.aws.delete_route_server_peer(&id).await {
+                Ok(()) => {
+                    info!("route_server_peer_sweep peer={id} owner={} reason={}", orphan.owner, orphan.reason);
+                    self.orphaned_since.lock().unwrap().remove(&id);
+                }
+                Err(e) => errors.push(format!("sweep {id}: {e}")),
+            }
+        }
+        errors
+    }
+
     async fn sessions(&self) -> Result<BTreeMap<String, Session>> {
         let text = self.runner.run(&self.vtysh("show bgp summary json"), 5.0).await?;
         frr::parse_summary(&json_of(&text, "bgp summary")?)
@@ -239,6 +275,7 @@ impl Controller {
                     errors.push(format!("{address}: announcements withheld: {reason}"));
                 }
                 let result = self.reconcile(&observation).await;
+                errors.extend(self.sweep(&observation, monotonic()).await);
                 self.status.lock().unwrap().observation = observation;
                 result.unwrap_or_else(|e| {
                     errors.push(e.to_string());
@@ -313,6 +350,7 @@ impl StatusSource for Controller {
             "tunnels": o.discovered.tunnels,
             "ignored": o.discovered.ignored.iter().chain(&o.registration.ignored).collect::<Vec<_>>(),
             "registration": {"create": o.registration.create, "delete": o.registration.delete},
+            "orphans": o.orphans,
             "announced": o.announcements.prefixes,
             "withheld": o.announcements.withheld,
             "sessions": status.sessions,
@@ -330,6 +368,7 @@ impl StatusSource for Controller {
             format!("bgp_sessions_established {established}"),
             format!("bgp_announced_prefixes {}", o.announcements.prefixes.len()),
             format!("bgp_gated_neighbors {}", o.gated.len()),
+            format!("bgp_orphaned_peers {}", o.orphans.len()),
         ];
         for (address, s) in &status.sessions {
             lines.push(format!("bgp_session_up{{neighbor=\"{address}\"}} {}", u8::from(s.state == "Established")));

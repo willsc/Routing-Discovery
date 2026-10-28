@@ -108,3 +108,54 @@ pub fn owned(host: &Host, peers: &[RouteServerPeer]) -> Vec<String> {
         .map(|p| p.id.clone())
         .collect()
 }
+
+/// Instance states whose Route Server peers can never come back.
+fn ended(state: Option<&str>) -> Option<&'static str> {
+    match state {
+        None => Some("owner instance no longer exists"),
+        Some("terminated") => Some("owner instance terminated"),
+        Some("shutting-down") => Some("owner instance shutting down"),
+        // A stopped instance keeps its ENI and may start again.
+        Some(_) => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Orphan {
+    pub peer: String,
+    pub owner: String,
+    pub reason: String,
+}
+
+/// Owner instance IDs to look up: every tagged peer in this VPC except this instance's own.
+pub fn owners(host: &Host, peers: &[RouteServerPeer]) -> Vec<String> {
+    let ids: BTreeSet<String> = peers
+        .iter()
+        .filter(|p| p.vpc_id == host.vpc_id && !gone(&p.state))
+        .filter_map(|p| p.owner.clone())
+        .filter(|o| *o != host.instance_id)
+        .collect();
+    ids.into_iter().collect()
+}
+
+/// Tagged peers in this VPC whose owner instance has ended. `states` holds the instances EC2 still reports.
+pub fn orphans(host: &Host, peers: &[RouteServerPeer], states: &BTreeMap<String, String>) -> Vec<Orphan> {
+    peers
+        .iter()
+        .filter(|p| p.vpc_id == host.vpc_id && !gone(&p.state))
+        .filter_map(|p| {
+            let owner = p.owner.as_ref().filter(|o| **o != host.instance_id)?;
+            let reason = ended(states.get(owner).map(String::as_str))?;
+            Some(Orphan { peer: p.id.clone(), owner: owner.clone(), reason: reason.into() })
+        })
+        .collect()
+}
+
+/// A peer must stay orphaned for `grace` seconds before deletion. DescribeInstances is eventually
+/// consistent, so a just-launched instance can briefly look absent; one observation is not enough.
+/// `first_seen` is updated in place: entries that are no longer orphaned are dropped.
+pub fn due(first_seen: &mut BTreeMap<String, f64>, orphans: &[Orphan], now: f64, grace: f64) -> Vec<String> {
+    let current: BTreeSet<&str> = orphans.iter().map(|o| o.peer.as_str()).collect();
+    first_seen.retain(|peer, _| current.contains(peer.as_str()));
+    orphans.iter().filter(|o| now - *first_seen.entry(o.peer.clone()).or_insert(now) >= grace).map(|o| o.peer.clone()).collect()
+}

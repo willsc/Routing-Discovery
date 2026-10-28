@@ -55,7 +55,13 @@ With `--register`, the instance creates its own Route Server peers. It pairs eve
 - **Pending peers.** A new peer is `pending` at first. Status stays unconverged until a later pass discovers it as `available` and bgpd establishes the session.
 - **ASN and liveness.** The local ASN comes from `--register-asn` (default 65001) and must differ from the route server's ASN; endpoints where they match are listed under `ignored`. Liveness comes from `--register-liveness bfd|bgp-keepalive` (default `bfd`, which needs `bfdd`).
 - **Permissions.** Add [`deploy/bgp-aws-register-policy.json`](../deploy/bgp-aws-register-policy.json). It allows creating peers only with the owner tag and deleting only tagged peers. The tag value is not bound to the calling instance, so any instance with this role can delete another's tagged peers. Validate the condition keys in a staging account before production.
-- **Terminated instances.** Peers of a terminated instance remain until something deletes them. Run `bgp withdraw --apply` from a shutdown or Auto Scaling lifecycle hook, or sweep peers whose owner instance no longer exists.
+- **Terminated instances.** With `--sweep`, each instance also cleans up after others. It looks up the owners of every tagged peer in its VPC and deletes the peer once that owner is terminated, shutting down, or no longer known to EC2.
+  - Peers of stopped instances are kept, because a stopped instance can start again.
+  - Untagged peers, peers in other VPCs and the instance's own peers are never swept.
+  - A peer must stay orphaned for 5 minutes before deletion. DescribeInstances is eventually consistent, so a just-launched instance can briefly look absent, and its owner reappearing resets the clock.
+  - Several instances may sweep the same peer. A failed delete is reported in status and retried next pass; it does not fail the pass.
+  - Sweeping needs `ec2:DescribeInstances` and the tagged-delete permission, both in the registration policy. `bgp withdraw --apply` from a shutdown or lifecycle hook remains the faster path.
+  - Status lists candidates under `orphans`, and `bgp_orphaned_peers` counts them. Without `--apply`, deletions are only logged.
 
 ## Prerequisites
 
@@ -81,19 +87,18 @@ route-discovery bgp render-frr        # the bgpd configuration
 route-discovery bgp plan              # tunnel commands and frr-reload --test output
 route-discovery bgp run               # dry-run controller
 route-discovery bgp run --apply
-route-discovery bgp run --apply --register --register-asn 65001
+route-discovery bgp run --apply --register --register-asn 65001 --sweep
 route-discovery bgp withdraw --apply
 route-discovery status --url http://127.0.0.1:9811/status
 ```
 
-Optional flags: `--register`, `--register-asn`, `--register-liveness`, `--include`/`--exclude GLOB`, `--no-default-route`, `--maximum-paths`, `--frr-reload PATH`, `--vty-socket DIR`, `--interval` (at least 5 s), `--listen`, `--port` and `--state-dir`.
+Optional flags: `--register`, `--register-asn`, `--register-liveness`, `--sweep`, `--include`/`--exclude GLOB`, `--no-default-route`, `--maximum-paths`, `--frr-reload PATH`, `--vty-socket DIR`, `--interval` (at least 5 s), `--listen`, `--port` and `--state-dir`.
 
 Status is `ready` when every discovered neighbor is Established and no neighbor is gated.
 
 ## Not implemented
 
 - Creating Connect peers for the instance. Connect peers need inside CIDRs allocated per attachment, which belongs in IaC.
-- Sweeping peers left by terminated instances.
 - Cross-account discovery.
 - BGP MD5 or TCP-AO.
 - The on-prem Direct Connect router role.

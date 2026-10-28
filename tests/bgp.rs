@@ -250,6 +250,8 @@ struct FakeAws {
     peers: Mutex<Vec<RouteServerPeer>>,
     created: Mutex<Vec<PeerRequest>>,
     deleted: Mutex<Vec<String>>,
+    states: BTreeMap<String, String>,
+    fail_deletes: bool,
 }
 
 fn endpoint(id: &str, subnet: &str, state: &str) -> RouteServerEndpoint {
@@ -293,8 +295,14 @@ impl Peering for FakeAws {
         Ok("rsp-new".into())
     }
     async fn delete_route_server_peer(&self, id: &str) -> Result<()> {
+        if self.fail_deletes {
+            return Err(Error::Backend("IncorrectState: peer is already deleting".into()));
+        }
         self.deleted.lock().unwrap().push(id.into());
         Ok(())
+    }
+    async fn instance_states(&self, ids: &[String]) -> Result<BTreeMap<String, String>> {
+        Ok(self.states.iter().filter(|(id, _)| ids.contains(id)).map(|(k, v)| (k.clone(), v.clone())).collect())
     }
 }
 
@@ -343,6 +351,7 @@ fn controller_with(
         state_dir: dir.to_path_buf(),
         apply,
         register,
+        sweep: true,
     };
     let c = Controller::new(options, Arc::new(FakeImds::new()), aws.clone(), runner.clone());
     (c, runner, aws)
@@ -469,4 +478,98 @@ async fn withdraw_deletes_owned_peers() {
     aws.peers.lock().unwrap().push(owned_peer("rsp-mine", "rse-a", "10.0.1.10", "available"));
     route_discovery::bgp::withdraw(&c).await.unwrap();
     assert_eq!(*aws.deleted.lock().unwrap(), ["rsp-mine"]);
+}
+
+fn tagged(id: &str, owner: &str) -> RouteServerPeer {
+    let mut peer = rs_peer(id, "10.0.3.10", "10.0.3.230");
+    peer.owner = Some(owner.into());
+    peer
+}
+
+fn fleet() -> (Vec<RouteServerPeer>, BTreeMap<String, String>) {
+    let mut elsewhere = tagged("rsp-other-vpc", "i-gone2");
+    elsewhere.vpc_id = "vpc-2".into();
+    let mut deleting = tagged("rsp-deleting", "i-gone");
+    deleting.state = "deleting".into();
+    let peers = vec![
+        tagged("rsp-running", "i-running"),
+        tagged("rsp-stopped", "i-stopped"),
+        tagged("rsp-terminated", "i-terminated"),
+        tagged("rsp-shutting", "i-shutting"),
+        tagged("rsp-gone", "i-gone"),
+        tagged("rsp-self", "i-0123456789abcdef0"),
+        rs_peer("rsp-untagged", "10.0.4.10", "10.0.4.230"),
+        elsewhere,
+        deleting,
+    ];
+    let states = BTreeMap::from([
+        ("i-running".to_string(), "running".to_string()),
+        ("i-stopped".to_string(), "stopped".to_string()),
+        ("i-terminated".to_string(), "terminated".to_string()),
+        ("i-shutting".to_string(), "shutting-down".to_string()),
+    ]);
+    (peers, states)
+}
+
+#[tokio::test]
+async fn sweep_finds_peers_of_ended_instances_in_this_vpc() {
+    let h = test_host().await;
+    let (peers, states) = fleet();
+    assert_eq!(registration::owners(&h, &peers), ["i-gone", "i-running", "i-shutting", "i-stopped", "i-terminated"]);
+    let orphans = registration::orphans(&h, &peers, &states);
+    let found: Vec<(&str, &str)> = orphans.iter().map(|o| (o.peer.as_str(), o.reason.as_str())).collect();
+    assert_eq!(
+        found,
+        [
+            ("rsp-terminated", "owner instance terminated"),
+            ("rsp-shutting", "owner instance shutting down"),
+            ("rsp-gone", "owner instance no longer exists"),
+        ]
+    );
+}
+
+#[test]
+fn sweep_waits_out_the_grace_period() {
+    let orphan = |peer: &str| registration::Orphan { peer: peer.into(), owner: "i-x".into(), reason: "gone".into() };
+    let mut seen = BTreeMap::new();
+    assert!(registration::due(&mut seen, &[orphan("a")], 100.0, 300.0).is_empty());
+    assert!(registration::due(&mut seen, &[orphan("a"), orphan("b")], 399.0, 300.0).is_empty());
+    assert_eq!(registration::due(&mut seen, &[orphan("a"), orphan("b")], 400.0, 300.0), ["a"]);
+    // An owner that reappears (eventual consistency) resets its clock.
+    assert!(registration::due(&mut seen, &[orphan("b")], 401.0, 300.0).is_empty());
+    assert!(registration::due(&mut seen, &[orphan("a"), orphan("b")], 500.0, 300.0).is_empty());
+    assert_eq!(seen.keys().collect::<Vec<_>>(), ["a", "b"]);
+}
+
+#[tokio::test]
+async fn controller_sweeps_after_grace_and_tolerates_races() {
+    let dir = tempfile::tempdir().unwrap();
+    let (peers, states) = fleet();
+    let build = |apply: bool, fail_deletes: bool| {
+        let (c, _, _) = controller_with(false, apply, None, dir.path());
+        let aws =
+            Arc::new(FakeAws { peers: Mutex::new(peers.clone()), states: states.clone(), fail_deletes, ..FakeAws::default() });
+        let c = Controller::new(c.options.clone(), Arc::new(FakeImds::new()), aws.clone(), Arc::new(Recorder::default()));
+        (c, aws)
+    };
+    let (c, aws) = build(true, false);
+    let o = c.observe().await.unwrap();
+    assert_eq!(o.orphans.len(), 3);
+    assert!(c.sweep(&o, 1000.0).await.is_empty());
+    assert!(aws.deleted.lock().unwrap().is_empty());
+    assert!(c.sweep(&o, 1000.0 + route_discovery::bgp::SWEEP_GRACE).await.is_empty());
+    assert_eq!(*aws.deleted.lock().unwrap(), ["rsp-terminated", "rsp-shutting", "rsp-gone"]);
+
+    let (c, aws) = build(false, false);
+    let o = c.observe().await.unwrap();
+    c.sweep(&o, 0.0).await;
+    assert!(c.sweep(&o, 1e6).await.is_empty());
+    assert!(aws.deleted.lock().unwrap().is_empty());
+
+    let (c, _) = build(true, true);
+    let o = c.observe().await.unwrap();
+    c.sweep(&o, 0.0).await;
+    let errors = c.sweep(&o, 1e6).await;
+    assert_eq!(errors.len(), 3);
+    assert!(errors[0].contains("already deleting"));
 }

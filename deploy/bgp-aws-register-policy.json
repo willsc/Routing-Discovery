@@ -8,12 +8,20 @@
       "Resource": "*"
     },
     {
+      "Sid": "SweepOwnerLookup",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*"
+    },
+    {
       "Sid": "CreateOwnedPeersOnly",
       "Effect": "Allow",
       "Action": "ec2:CreateRouteServerPeer",
       "Resource": "*",
       "Condition": {
-        "Null": { "aws:RequestTag/route-discovery:owner": "false" }
+        "Null": {
+          "aws:RequestTag/route-discovery:owner": "false"
+        }
       }
     },
     {
@@ -22,7 +30,9 @@
       "Action": "ec2:CreateTags",
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "ec2:CreateAction": "CreateRouteServerPeer" }
+        "StringEquals": {
+          "ec2:CreateAction": "CreateRouteServerPeer"
+        }
       }
     },
     {
@@ -31,7 +41,9 @@
       "Action": "ec2:DeleteRouteServerPeer",
       "Resource": "*",
       "Condition": {
-        "Null": { "aws:ResourceTag/route-discovery:owner": "false" }
+        "Null": {
+          "aws:ResourceTag/route-discovery:owner": "false"
+        }
       }
     }
   ]

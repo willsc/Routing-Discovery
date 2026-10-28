@@ -164,6 +164,9 @@ struct BgpArgs {
     /// Create this instance's VPC Route Server peers on endpoints in its subnets
     #[arg(long)]
     register: bool,
+    /// Delete tagged Route Server peers in this VPC whose owner instance has terminated
+    #[arg(long)]
+    sweep: bool,
     /// Local ASN for self-registered peers; must differ from the route server's ASN
     #[arg(long, default_value_t = 65001, requires = "register")]
     register_asn: u32,
@@ -283,6 +286,7 @@ fn bgp_options(args: BgpArgs) -> Result<bgp::Options> {
         port: args.port,
         state_dir: args.state_dir,
         apply: args.apply,
+        sweep: args.sweep,
         register: args.register.then(|| bgp::registration::Registration {
             asn: args.register_asn,
             liveness: match args.register_liveness {
