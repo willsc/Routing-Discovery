@@ -4,9 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use route_discovery::bgp::advertise::{default_filter, select};
-use route_discovery::bgp::discovery::{resolve, tunnel_name, ConnectBgp, ConnectPeer, Kind, Peering, RouteServerPeer};
+use route_discovery::bgp::discovery::{
+    resolve, tunnel_name, ConnectBgp, ConnectPeer, Kind, Peering, RouteServerEndpoint, RouteServerPeer,
+};
 use route_discovery::bgp::frr::{parse_summary, render, Plan, Policy};
 use route_discovery::bgp::metadata::{host, Host, Metadata};
+use route_discovery::bgp::registration::{self, PeerRequest, Registration};
 use route_discovery::bgp::{gre, Controller, Options};
 use route_discovery::commands::Runner;
 use route_discovery::error::{Error, Result};
@@ -57,6 +60,8 @@ fn rs_peer(id: &str, peer: &str, endpoint: &str) -> RouteServerPeer {
         peer_address: peer.into(),
         peer_asn: Some(65010),
         liveness: Some("bfd".into()),
+        endpoint_id: format!("rse-{id}"),
+        owner: None,
     }
 }
 
@@ -239,14 +244,37 @@ fn sessions_from_summary() {
     assert!(parse_summary(&json!([])).is_err());
 }
 
+#[derive(Default)]
 struct FakeAws {
     checks: bool,
+    peers: Mutex<Vec<RouteServerPeer>>,
+    created: Mutex<Vec<PeerRequest>>,
+    deleted: Mutex<Vec<String>>,
+}
+
+fn endpoint(id: &str, subnet: &str, state: &str) -> RouteServerEndpoint {
+    RouteServerEndpoint {
+        id: id.into(),
+        route_server_id: "rs-1".into(),
+        vpc_id: "vpc-1".into(),
+        subnet_id: subnet.into(),
+        state: state.into(),
+    }
+}
+
+fn endpoints() -> Vec<RouteServerEndpoint> {
+    vec![
+        endpoint("rse-a", "subnet-a", "available"),
+        endpoint("rse-b", "subnet-b", "available"),
+        endpoint("rse-c", "subnet-c", "available"),
+        endpoint("rse-new", "subnet-a", "pending"),
+    ]
 }
 
 #[async_trait]
 impl Peering for FakeAws {
     async fn route_server_peers(&self) -> Result<Vec<RouteServerPeer>> {
-        Ok(route_servers())
+        Ok(self.peers.lock().unwrap().clone())
     }
     async fn route_server_asns(&self, _ids: &[String]) -> Result<BTreeMap<String, i64>> {
         Ok(asns())
@@ -257,6 +285,21 @@ impl Peering for FakeAws {
     async fn source_dest_checks(&self, ids: &[String]) -> Result<BTreeMap<String, bool>> {
         Ok(ids.iter().map(|id| (id.clone(), self.checks)).collect())
     }
+    async fn route_server_endpoints(&self) -> Result<Vec<RouteServerEndpoint>> {
+        Ok(endpoints())
+    }
+    async fn create_route_server_peer(&self, request: &PeerRequest) -> Result<String> {
+        self.created.lock().unwrap().push(request.clone());
+        Ok("rsp-new".into())
+    }
+    async fn delete_route_server_peer(&self, id: &str) -> Result<()> {
+        self.deleted.lock().unwrap().push(id.into());
+        Ok(())
+    }
+}
+
+fn registration_config() -> Registration {
+    Registration { asn: 65001, liveness: "bfd".into() }
 }
 
 #[derive(Default)]
@@ -277,7 +320,18 @@ impl Runner for Recorder {
 }
 
 fn controller(checks: bool, apply: bool, dir: &std::path::Path) -> (Controller, Arc<Recorder>) {
+    let (c, runner, _) = controller_with(checks, apply, None, dir);
+    (c, runner)
+}
+
+fn controller_with(
+    checks: bool,
+    apply: bool,
+    register: Option<Registration>,
+    dir: &std::path::Path,
+) -> (Controller, Arc<Recorder>, Arc<FakeAws>) {
     let runner = Arc::new(Recorder::default());
+    let aws = Arc::new(FakeAws { checks, peers: Mutex::new(route_servers()), ..FakeAws::default() });
     let options = Options {
         filter: default_filter(),
         policy: Policy::default(),
@@ -288,9 +342,10 @@ fn controller(checks: bool, apply: bool, dir: &std::path::Path) -> (Controller, 
         port: 0,
         state_dir: dir.to_path_buf(),
         apply,
+        register,
     };
-    let c = Controller::new(options, Arc::new(FakeImds::new()), Arc::new(FakeAws { checks }), runner.clone());
-    (c, runner)
+    let c = Controller::new(options, Arc::new(FakeImds::new()), aws.clone(), runner.clone());
+    (c, runner, aws)
 }
 
 #[tokio::test]
@@ -331,4 +386,87 @@ async fn dry_run_changes_nothing() {
     let o = c.observe().await.unwrap();
     assert!(!c.reconcile(&o).await.unwrap());
     assert!(runner.0.lock().unwrap().iter().all(|c| c.starts_with("ip -d") || c.starts_with("vtysh")));
+}
+
+fn owned_peer(id: &str, endpoint: &str, address: &str, state: &str) -> RouteServerPeer {
+    let mut peer = rs_peer(id, address, "10.0.1.230");
+    peer.endpoint_id = endpoint.into();
+    peer.state = state.into();
+    peer.owner = Some("i-0123456789abcdef0".into());
+    peer
+}
+
+#[tokio::test]
+async fn registration_pairs_endpoints_with_same_subnet_enis() {
+    let h = test_host().await;
+    // rse-a already has an operator-created peer for 10.0.1.10.
+    let mut existing = rs_peer("rsp-ops", "10.0.1.10", "10.0.1.230");
+    existing.endpoint_id = "rse-a".into();
+    let changes = registration::plan(&h, &endpoints(), &[existing], &asns(), &registration_config());
+    assert_eq!(changes.create.len(), 1);
+    let create = &changes.create[0];
+    assert_eq!((create.endpoint_id.as_str(), create.peer_address.as_str()), ("rse-b", "10.0.2.10"));
+    assert_eq!((create.peer_asn, create.liveness.as_str(), create.owner.as_str()), (65001, "bfd", "i-0123456789abcdef0"));
+    // rse-c is in a subnet this instance has no ENI in; rse-new is not ready yet.
+    assert_eq!(changes.ignored.iter().map(|i| i.resource.as_str()).collect::<Vec<_>>(), ["rse-new"]);
+    assert!(changes.delete.is_empty());
+}
+
+#[tokio::test]
+async fn registration_deletes_only_stale_or_failed_owned_peers() {
+    let h = test_host().await;
+    let peers = vec![
+        owned_peer("rsp-ok", "rse-a", "10.0.1.10", "available"),
+        owned_peer("rsp-failed", "rse-b", "10.0.2.10", "failed"),
+        owned_peer("rsp-stale", "rse-gone", "10.0.1.10", "available"),
+        owned_peer("rsp-going", "rse-gone", "10.0.1.10", "deleting"),
+        rs_peer("rsp-foreign", "10.0.9.9", "10.0.9.230"),
+    ];
+    let changes = registration::plan(&h, &endpoints(), &peers, &asns(), &registration_config());
+    assert_eq!(changes.delete, ["rsp-failed", "rsp-stale"]);
+    // The failed peer is replaced on a later pass, once AWS reports it deleting or deleted.
+    assert!(changes.create.is_empty());
+    let replaced =
+        vec![owned_peer("rsp-ok", "rse-a", "10.0.1.10", "available"), owned_peer("rsp-failed", "rse-b", "10.0.2.10", "deleting")];
+    let changes = registration::plan(&h, &endpoints(), &replaced, &asns(), &registration_config());
+    assert_eq!(changes.create.iter().map(|c| c.endpoint_id.as_str()).collect::<Vec<_>>(), ["rse-b"]);
+    assert_eq!(registration::owned(&h, &peers), ["rsp-ok", "rsp-failed", "rsp-stale"]);
+}
+
+#[tokio::test]
+async fn registration_refuses_the_route_server_asn() {
+    let h = test_host().await;
+    let changes = registration::plan(&h, &endpoints(), &[], &asns(), &Registration { asn: 65000, liveness: "bfd".into() });
+    assert!(changes.create.is_empty());
+    assert!(changes.ignored.iter().any(|i| i.reason.contains("eBGP")));
+}
+
+#[tokio::test]
+async fn controller_registers_only_when_applying() {
+    let dir = tempfile::tempdir().unwrap();
+    let (c, _, aws) = controller_with(false, false, Some(registration_config()), dir.path());
+    let o = c.observe().await.unwrap();
+    assert_eq!(o.registration.create.len(), 2);
+    assert!(!c.reconcile(&o).await.unwrap());
+    assert!(aws.created.lock().unwrap().is_empty());
+    let (c, _, aws) = controller_with(false, true, Some(registration_config()), dir.path());
+    let o = c.observe().await.unwrap();
+    // Not converged until the new peers are discovered as available.
+    assert!(!c.reconcile(&o).await.unwrap());
+    let created: Vec<String> = aws.created.lock().unwrap().iter().map(|r| r.endpoint_id.clone()).collect();
+    assert_eq!(created, ["rse-a", "rse-b"]);
+    let (c, _, aws) = controller_with(false, true, None, dir.path());
+    let o = c.observe().await.unwrap();
+    assert!(o.registration.is_empty());
+    assert!(c.reconcile(&o).await.unwrap());
+    assert!(aws.created.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn withdraw_deletes_owned_peers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (c, _, aws) = controller_with(false, true, None, dir.path());
+    aws.peers.lock().unwrap().push(owned_peer("rsp-mine", "rse-a", "10.0.1.10", "available"));
+    route_discovery::bgp::withdraw(&c).await.unwrap();
+    assert_eq!(*aws.deleted.lock().unwrap(), ["rsp-mine"]);
 }

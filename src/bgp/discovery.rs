@@ -9,6 +9,7 @@ use ipnet::IpNet;
 use serde::Serialize;
 
 use super::metadata::Host;
+use super::registration::PeerRequest;
 use crate::error::Result;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -22,6 +23,18 @@ pub struct RouteServerPeer {
     pub peer_asn: Option<i64>,
     /// `bfd` or `bgp-keepalive`
     pub liveness: Option<String>,
+    pub endpoint_id: String,
+    /// Value of the registration owner tag, when this mode created the peer.
+    pub owner: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RouteServerEndpoint {
+    pub id: String,
+    pub route_server_id: String,
+    pub vpc_id: String,
+    pub subnet_id: String,
+    pub state: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -52,6 +65,10 @@ pub trait Peering: Send + Sync {
     async fn connect_peers(&self) -> Result<Vec<ConnectPeer>>;
     /// Source/destination check by ENI ID.
     async fn source_dest_checks(&self, eni_ids: &[String]) -> Result<BTreeMap<String, bool>>;
+    async fn route_server_endpoints(&self) -> Result<Vec<RouteServerEndpoint>>;
+    /// Returns the new peer's ID.
+    async fn create_route_server_peer(&self, request: &PeerRequest) -> Result<String>;
+    async fn delete_route_server_peer(&self, id: &str) -> Result<()>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -222,6 +239,7 @@ mod sdk {
     use aws_sdk_ec2::Client;
 
     use super::*;
+    use crate::bgp::registration::OWNER_TAG;
     use crate::error::Error;
 
     pub struct SdkPeering {
@@ -267,6 +285,8 @@ mod sdk {
                     peer_address: text(peer.peer_address()),
                     peer_asn: options.and_then(|o| o.peer_asn()),
                     liveness: options.and_then(|o| o.peer_liveness_detection()).map(|l| l.as_str().to_string()),
+                    endpoint_id: text(peer.route_server_endpoint_id()),
+                    owner: peer.tags().iter().find(|t| t.key() == Some(OWNER_TAG)).and_then(|t| t.value()).map(str::to_string),
                 });
             }
             Ok(peers)
@@ -329,6 +349,52 @@ mod sdk {
                 .iter()
                 .filter_map(|e| Some((e.network_interface_id()?.to_string(), e.source_dest_check().unwrap_or(true))))
                 .collect())
+        }
+
+        async fn route_server_endpoints(&self) -> Result<Vec<RouteServerEndpoint>> {
+            let mut pages = self.client.describe_route_server_endpoints().into_paginator().items().send();
+            let mut endpoints = vec![];
+            while let Some(endpoint) = pages.next().await {
+                let endpoint = endpoint.map_err(api)?;
+                endpoints.push(RouteServerEndpoint {
+                    id: text(endpoint.route_server_endpoint_id()),
+                    route_server_id: text(endpoint.route_server_id()),
+                    vpc_id: text(endpoint.vpc_id()),
+                    subnet_id: text(endpoint.subnet_id()),
+                    state: endpoint.state().map(|s| s.as_str().to_string()).unwrap_or_default(),
+                });
+            }
+            Ok(endpoints)
+        }
+
+        async fn create_route_server_peer(&self, request: &PeerRequest) -> Result<String> {
+            use aws_sdk_ec2::types::{
+                ResourceType, RouteServerBgpOptionsRequest, RouteServerPeerLivenessMode, Tag, TagSpecification,
+            };
+            let options = RouteServerBgpOptionsRequest::builder()
+                .peer_asn(i64::from(request.peer_asn))
+                .peer_liveness_detection(RouteServerPeerLivenessMode::from(request.liveness.as_str()))
+                .build();
+            let tags = TagSpecification::builder()
+                .resource_type(ResourceType::RouteServerPeer)
+                .tags(Tag::builder().key(OWNER_TAG).value(&request.owner).build())
+                .build();
+            let output = self
+                .client
+                .create_route_server_peer()
+                .route_server_endpoint_id(&request.endpoint_id)
+                .peer_address(&request.peer_address)
+                .bgp_options(options)
+                .tag_specifications(tags)
+                .send()
+                .await
+                .map_err(api)?;
+            Ok(text(output.route_server_peer().and_then(|p| p.route_server_peer_id())))
+        }
+
+        async fn delete_route_server_peer(&self, id: &str) -> Result<()> {
+            self.client.delete_route_server_peer().route_server_peer_id(id).send().await.map_err(api)?;
+            Ok(())
         }
     }
 }

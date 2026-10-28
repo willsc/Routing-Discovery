@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod frr;
 pub mod gre;
 pub mod metadata;
+pub mod registration;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -48,6 +49,8 @@ pub struct Options {
     pub port: u16,
     pub state_dir: PathBuf,
     pub apply: bool,
+    /// Create this instance's Route Server peers; None leaves peering resources to IaC.
+    pub register: Option<registration::Registration>,
 }
 
 /// Everything one pass decided, before any change is made.
@@ -59,6 +62,7 @@ pub struct Observation {
     /// Neighbors denied announcements, with the reason.
     pub gated: BTreeMap<IpAddr, String>,
     pub tunnel_commands: Vec<Vec<String>>,
+    pub registration: registration::Changes,
     pub config: String,
 }
 
@@ -118,9 +122,15 @@ impl Controller {
     pub async fn observe(&self) -> Result<Observation> {
         let host = metadata::host(self.metadata.as_ref()).await?;
         let (peers, connects) = futures::try_join!(self.aws.route_server_peers(), self.aws.connect_peers())?;
-        let ids: BTreeSet<String> = peers.iter().map(|p| p.route_server_id.clone()).collect();
+        let endpoints = if self.options.register.is_some() { self.aws.route_server_endpoints().await? } else { vec![] };
+        let ids: BTreeSet<String> =
+            peers.iter().map(|p| p.route_server_id.clone()).chain(endpoints.iter().map(|e| e.route_server_id.clone())).collect();
         let asns = self.aws.route_server_asns(&ids.into_iter().collect::<Vec<_>>()).await?;
         let discovered = discovery::resolve(&host, &peers, &asns, &connects);
+        let registration = match &self.options.register {
+            Some(r) => registration::plan(&host, &endpoints, &peers, &asns, r),
+            None => registration::Changes::default(),
+        };
         let interfaces = json_of(&self.runner.run(&argv(["ip", "-d", "-json", "addr", "show"]), 3.0).await?, "ip addr")?;
         let announcements = advertise::select(&interfaces, &self.options.filter, &host)?;
         let enis: BTreeSet<String> = discovered.neighbors.iter().filter_map(|n| n.eni.clone()).collect();
@@ -149,7 +159,7 @@ impl Controller {
             policy: &self.options.policy,
         });
         let tunnel_commands = gre::plan(&discovered.tunnels, &gre::parse(&interfaces)?);
-        Ok(Observation { host: Some(host), discovered, announcements, gated, tunnel_commands, config })
+        Ok(Observation { host: Some(host), discovered, announcements, gated, tunnel_commands, registration, config })
     }
 
     fn config_path(&self) -> PathBuf {
@@ -179,13 +189,26 @@ impl Controller {
         self.runner.run(&self.reload_args(&path, "--test"), 30.0).await
     }
 
-    /// Apply tunnels then bgpd. Returns true when nothing is left to do.
+    /// Apply Route Server registration, tunnels, then bgpd. Returns true when nothing is left to do.
+    /// A peer created in this pass is `pending`; the next pass discovers it once AWS makes it available.
     pub async fn reconcile(&self, observation: &Observation) -> Result<bool> {
+        let changes = &observation.registration;
         if !self.options.apply {
             if !observation.tunnel_commands.is_empty() {
                 info!("dry_run_tunnels commands={:?}", observation.tunnel_commands);
             }
-            return Ok(observation.tunnel_commands.is_empty());
+            if !changes.is_empty() {
+                info!("dry_run_registration create={:?} delete={:?}", changes.create, changes.delete);
+            }
+            return Ok(observation.tunnel_commands.is_empty() && changes.is_empty());
+        }
+        for id in &changes.delete {
+            info!("route_server_peer_delete id={id}");
+            self.aws.delete_route_server_peer(id).await?;
+        }
+        for request in &changes.create {
+            let id = self.aws.create_route_server_peer(request).await?;
+            info!("route_server_peer_create id={id} endpoint={} address={}", request.endpoint_id, request.peer_address);
         }
         for command in &observation.tunnel_commands {
             info!("gre_command {}", command.join(" "));
@@ -200,7 +223,7 @@ impl Controller {
             self.runner.run(&self.reload_args(&path, "--reload"), 60.0).await?;
             *self.applied.lock().unwrap() = Some((observation.config.clone(), now));
         }
-        Ok(true)
+        Ok(changes.is_empty())
     }
 
     async fn sessions(&self) -> Result<BTreeMap<String, Session>> {
@@ -288,7 +311,8 @@ impl StatusSource for Controller {
             "host": o.host,
             "neighbors": o.discovered.neighbors,
             "tunnels": o.discovered.tunnels,
-            "ignored": o.discovered.ignored,
+            "ignored": o.discovered.ignored.iter().chain(&o.registration.ignored).collect::<Vec<_>>(),
+            "registration": {"create": o.registration.create, "delete": o.registration.delete},
             "announced": o.announcements.prefixes,
             "withheld": o.announcements.withheld,
             "sessions": status.sessions,
@@ -342,7 +366,7 @@ pub async fn run(options: Options) -> Result<()> {
     result
 }
 
-/// Remove owned GRE tunnels and replace bgpd's configuration with the bare filters.
+/// Remove owned GRE tunnels and Route Server peers, and replace bgpd's configuration with the bare filters.
 pub async fn withdraw(controller: &Controller) -> Result<()> {
     let interfaces = json_of(&controller.runner.run(&argv(["ip", "-d", "-json", "addr", "show"]), 3.0).await?, "ip addr")?;
     let empty = frr::render(&frr::Plan {
@@ -357,6 +381,12 @@ pub async fn withdraw(controller: &Controller) -> Result<()> {
     controller.runner.run(&controller.reload_args(&path, "--reload"), 60.0).await?;
     for command in gre::plan(&[], &gre::parse(&interfaces)?) {
         controller.runner.run(&command, 5.0).await?;
+    }
+    // Sessions are already down, so deleting the peers cannot strand traffic on a stale route.
+    let host = metadata::host(controller.metadata.as_ref()).await?;
+    for id in registration::owned(&host, &controller.aws.route_server_peers().await?) {
+        info!("route_server_peer_delete id={id}");
+        controller.aws.delete_route_server_peer(&id).await?;
     }
     if controller.sessions().await?.is_empty() {
         Ok(())

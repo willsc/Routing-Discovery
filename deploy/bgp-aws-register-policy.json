@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DiscoverEndpoints",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeRouteServerEndpoints",
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateOwnedPeersOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateRouteServerPeer",
+      "Resource": "*",
+      "Condition": {
+        "Null": { "aws:RequestTag/route-discovery:owner": "false" }
+      }
+    },
+    {
+      "Sid": "TagOnCreate",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "ec2:CreateAction": "CreateRouteServerPeer" }
+      }
+    },
+    {
+      "Sid": "DeleteOwnedPeersOnly",
+      "Effect": "Allow",
+      "Action": "ec2:DeleteRouteServerPeer",
+      "Resource": "*",
+      "Condition": {
+        "Null": { "aws:ResourceTag/route-discovery:owner": "false" }
+      }
+    }
+  ]
+}

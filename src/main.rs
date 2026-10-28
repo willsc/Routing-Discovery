@@ -161,6 +161,21 @@ struct BgpArgs {
     /// Create tunnels and reload bgpd (default is dry-run)
     #[arg(long)]
     apply: bool,
+    /// Create this instance's VPC Route Server peers on endpoints in its subnets
+    #[arg(long)]
+    register: bool,
+    /// Local ASN for self-registered peers; must differ from the route server's ASN
+    #[arg(long, default_value_t = 65001, requires = "register")]
+    register_asn: u32,
+    /// Liveness detection for self-registered peers
+    #[arg(long, value_enum, default_value_t = Liveness::Bfd, requires = "register")]
+    register_liveness: Liveness,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Liveness {
+    Bfd,
+    BgpKeepalive,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -249,6 +264,10 @@ fn bgp_options(args: BgpArgs) -> Result<bgp::Options> {
     if !(args.interval.is_finite() && args.interval >= 5.0) {
         return config_err("--interval must be at least 5 seconds to stay within EC2 API rate limits");
     }
+    // 0 and AS_TRANS (23456) are not valid speaker ASNs.
+    if args.register && matches!(args.register_asn, 0 | 23456) {
+        return config_err("--register-asn must be a valid BGP ASN");
+    }
     if !(1..=64).contains(&args.maximum_paths) {
         return config_err("--maximum-paths must be 1-64");
     }
@@ -264,6 +283,14 @@ fn bgp_options(args: BgpArgs) -> Result<bgp::Options> {
         port: args.port,
         state_dir: args.state_dir,
         apply: args.apply,
+        register: args.register.then(|| bgp::registration::Registration {
+            asn: args.register_asn,
+            liveness: match args.register_liveness {
+                Liveness::Bfd => "bfd",
+                Liveness::BgpKeepalive => "bgp-keepalive",
+            }
+            .into(),
+        }),
     })
 }
 

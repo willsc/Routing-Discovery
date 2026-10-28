@@ -43,13 +43,26 @@ Every 15 seconds it does the following:
 | Direct Connect private VIF / transit VIF | AWS-managed, through the VGW or DX gateway and TGW. This mode does not run on the on-prem router that terminates the VIF. |
 | PrivateLink | Not routed. Interface endpoint IPs sit inside the consumer VPC CIDR and are reachable wherever that VPC CIDR is routed. VPCs with overlapping CIDRs cannot be joined by routing. |
 
+## Self-registration
+
+With `--register`, the instance creates its own Route Server peers. It pairs every `available` route server endpoint in the VPC with the primary IPv4 address of this instance's ENI in the same subnet. A launched instance therefore joins Route Server with no per-instance IaC, and a new subnet endpoint is picked up on the next pass.
+
+- **Ownership tag.** Peers it creates are tagged `route-discovery:owner=<instance-id>`. Only peers with this instance's tag are ever deleted, so operator-created peers are left alone and still used.
+- **Cleanup.**
+  - An owned peer is deleted when its endpoint disappears, the ENI address changes, or the peer goes `failed`.
+  - A failed peer is recreated on a later pass, after AWS reports it deleting.
+  - `bgp withdraw --apply` brings the BGP sessions down first, then deletes every owned peer.
+- **Pending peers.** A new peer is `pending` at first. Status stays unconverged until a later pass discovers it as `available` and bgpd establishes the session.
+- **ASN and liveness.** The local ASN comes from `--register-asn` (default 65001) and must differ from the route server's ASN; endpoints where they match are listed under `ignored`. Liveness comes from `--register-liveness bfd|bgp-keepalive` (default `bfd`, which needs `bfdd`).
+- **Permissions.** Add [`deploy/bgp-aws-register-policy.json`](../deploy/bgp-aws-register-policy.json). It allows creating peers only with the owner tag and deleting only tagged peers. The tag value is not bound to the calling instance, so any instance with this role can delete another's tagged peers. Validate the condition keys in a staging account before production.
+- **Terminated instances.** Peers of a terminated instance remain until something deletes them. Run `bgp withdraw --apply` from a shutdown or Auto Scaling lifecycle hook, or sweep peers whose owner instance no longer exists.
+
 ## Prerequisites
 
-The peering resources must already exist, created through IaC or the console:
-- A Route Server associated with the VPC, endpoints in the instance's subnets, a peer resource for this instance's address, and propagation enabled on the route tables.
+The remaining peering resources must already exist, created through IaC or the console:
+- A Route Server associated with the VPC, with endpoints in the instance's subnets and propagation enabled on the route tables.
+- Without `--register`, a peer resource for this instance's address.
 - For Connect: a Connect attachment and Connect peers whose peer address is this instance's ENI address, with a TGW CIDR block routed to the TGW attachment in the instance's subnet route table.
-
-This mode finds those resources; it does not create them.
 
 On the instance you also need:
 - FRR with `bgpd=yes` (and `bfdd=yes` for BFD) and `frr-reload.py`, plus the IAM permissions in [`deploy/bgp-aws-policy.json`](../deploy/bgp-aws-policy.json).
@@ -68,17 +81,19 @@ route-discovery bgp render-frr        # the bgpd configuration
 route-discovery bgp plan              # tunnel commands and frr-reload --test output
 route-discovery bgp run               # dry-run controller
 route-discovery bgp run --apply
+route-discovery bgp run --apply --register --register-asn 65001
 route-discovery bgp withdraw --apply
 route-discovery status --url http://127.0.0.1:9811/status
 ```
 
-Optional flags: `--include`/`--exclude GLOB`, `--no-default-route`, `--maximum-paths`, `--frr-reload PATH`, `--vty-socket DIR`, `--interval` (at least 5 s), `--listen`, `--port` and `--state-dir`.
+Optional flags: `--register`, `--register-asn`, `--register-liveness`, `--include`/`--exclude GLOB`, `--no-default-route`, `--maximum-paths`, `--frr-reload PATH`, `--vty-socket DIR`, `--interval` (at least 5 s), `--listen`, `--port` and `--state-dir`.
 
 Status is `ready` when every discovered neighbor is Established and no neighbor is gated.
 
 ## Not implemented
 
-- Creating Route Server peers or Connect peers for the instance.
+- Creating Connect peers for the instance. Connect peers need inside CIDRs allocated per attachment, which belongs in IaC.
+- Sweeping peers left by terminated instances.
 - Cross-account discovery.
 - BGP MD5 or TCP-AO.
 - The on-prem Direct Connect router role.
