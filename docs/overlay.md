@@ -6,6 +6,8 @@ Babel normally finds neighbours with link-local multicast, which VPCs, peering a
 
 ![How the overlay hangs together: who tunnels to whom, the registry and reconcile loops, how a packet leaves through a tunnel, and failover when a Direct Connect path fails](images/overlay.svg)
 
+A longer version with captions, [`overlay-diagrams.html`](overlay-diagrams.html), opens in a browser from a checkout.
+
 ## How hosts find each other
 
 Each host writes one JSON object to `s3://bucket/prefix/hosts/<host>.json`: its host ID, hostname, site, platform, tunnel endpoint and the time it first registered. It rewrites it every `--registry-interval` (default 60 s) and lists the prefix to see everyone else.

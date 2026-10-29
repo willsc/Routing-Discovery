@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Route Discovery Overlay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: one reading column of numbered figures, each a single mechanism with its caption; diagrams scroll sideways on phones. */
+:root {
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --fg: #18202a;
+  --muted: #5a6574;
+  --line: #c3ccd7;
+  --tunnel: #2453b8;
+  --underlay: #a35a00;
+  --fail: #b92d22;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10151c; --panel: #18202a; --fg: #e3e8ee; --muted: #9aa6b4; --line: #3a4656;
+    --tunnel: #7da2ff; --underlay: #e9a64a; --fail: #ff7b6e; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10151c; --panel: #18202a; --fg: #e3e8ee; --muted: #9aa6b4; --line: #3a4656;
+  --tunnel: #7da2ff; --underlay: #e9a64a; --fail: #ff7b6e; color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 16px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+main { max-width: 960px; margin: 0 auto; display: grid; gap: 56px; }
+header { display: grid; gap: 12px; max-width: 68ch; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 600; font-size: clamp(2rem, 5vw, 3rem); line-height: 1.05; margin: 0; text-wrap: balance; }
+h2 { font-family: var(--display); font-weight: 600; font-size: 1.5rem; line-height: 1.2; margin: 0; text-wrap: balance; }
+p { margin: 0; max-width: 68ch; }
+code { font-family: var(--mono); font-size: .9em; }
+section { display: grid; gap: 16px; }
+.num { font-family: var(--mono); color: var(--tunnel); font-size: .8em; margin-right: .5em; }
+figure { margin: 0; display: grid; gap: 12px; }
+.frame { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; padding: 16px; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { color: var(--muted); font-size: 14.5px; max-width: 72ch; }
+.key { display: flex; flex-wrap: wrap; gap: 8px 24px; font-size: 13.5px; color: var(--muted); }
+.key span { display: inline-flex; align-items: center; gap: 8px; }
+.swatch { width: 28px; height: 0; border-top: 3px solid var(--tunnel); }
+.swatch.under { border-top: 2px solid var(--underlay); }
+.swatch.native { border-top: 2px solid var(--muted); }
+.swatch.fail { border-top: 2px dashed var(--fail); }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 600px; font-size: 14.5px; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+footer { color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); padding-top: 16px; }
+
+/* SVG marks, styled from the page so both themes apply */
+svg text { font-family: var(--body); font-size: 12.5px; fill: var(--fg); }
+svg .t-strong { font-weight: 600; font-size: 13.5px; }
+svg .t-muted { fill: var(--muted); font-size: 11.5px; }
+svg .t-mono { font-family: var(--mono); font-size: 11.5px; }
+svg .t-tunnel { fill: var(--tunnel); font-weight: 500; }
+svg .t-under { fill: var(--underlay); font-style: italic; font-size: 12px; }
+svg .t-fail { fill: var(--fail); font-weight: 500; font-size: 12px; }
+svg .t-lane { font-family: var(--mono); font-size: 11.5px; letter-spacing: .06em; fill: var(--muted); text-transform: uppercase; }
+svg .site { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 6 4; }
+svg .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+svg .box-relay { fill: var(--panel); stroke: var(--tunnel); stroke-width: 2; }
+svg .tun { fill: none; stroke: var(--tunnel); stroke-width: 2; }
+svg .tun-bundle { fill: none; stroke: var(--tunnel); stroke-width: 5; stroke-linecap: round; }
+svg .active { fill: none; stroke: var(--tunnel); stroke-width: 4.5; stroke-linecap: round; }
+svg .idle { fill: none; stroke: var(--line); stroke-width: 2; }
+svg .native { fill: none; stroke: var(--muted); stroke-width: 2; }
+svg .flow { fill: none; stroke: var(--fg); stroke-width: 1.6; }
+svg .fail { fill: none; stroke: var(--fail); stroke-width: 2; stroke-dasharray: 6 5; }
+svg .head-fg { fill: var(--fg); }
+svg .head-tunnel { fill: var(--tunnel); }
+svg .head-fail { fill: var(--fail); }
+svg .head-muted { fill: var(--muted); }
+svg .cross { stroke: var(--fail); stroke-width: 3; stroke-linecap: round; }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">route-discovery · mesh role with --registry or --peers-file</div>
+    <h1>Route Discovery Overlay</h1>
+    <p>Every host runs the daemon, on EC2 and on bare metal. Hosts find each other through an S3 registry (or a peers file you distribute), build GRE tunnels to each other, and run Babel over them. There are no separate relay instances: in each VPC, two of the ordinary hosts also relay for the others. When a path fails, Babel moves traffic to another one. These four figures show who connects to whom, what runs when, how one packet moves through a host, and what changes when a Direct Connect path fails.</p>
+  </header>
+
+  <section>
+    <h2><span class="num">1</span>Who tunnels to whom</h2>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 900 450" role="img" aria-label="In each VPC, two of the hosts also relay. The other hosts tunnel only to those two. The relaying hosts in VPC A and VPC B tunnel to each other over VPC peering. The bare-metal host relays for itself and tunnels to every VPC's relaying hosts over Direct Connect through the carrier.">
+          <!-- VPC A -->
+          <rect class="site" x="30" y="40" width="330" height="230" rx="8"/>
+          <text x="46" y="32" class="t-strong">VPC A</text><text x="98" y="32" class="t-muted t-mono">site = vpc-a</text>
+          <!-- VPC B -->
+          <rect class="site" x="540" y="40" width="330" height="230" rx="8"/>
+          <text x="556" y="32" class="t-strong">VPC B</text><text x="608" y="32" class="t-muted t-mono">site = vpc-b</text>
+
+          <!-- member to relay tunnels, VPC A -->
+          <line class="tun" x1="125" y1="124" x2="125" y2="190"/>
+          <line class="tun" x1="160" y1="124" x2="235" y2="190"/>
+          <line class="tun" x1="235" y1="124" x2="160" y2="190"/>
+          <line class="tun" x1="265" y1="124" x2="265" y2="190"/>
+          <line class="tun" x1="180" y1="212" x2="210" y2="212"/>
+          <!-- member to relay tunnels, VPC B -->
+          <line class="tun" x1="680" y1="124" x2="640" y2="190"/>
+          <line class="tun" x1="730" y1="124" x2="770" y2="190"/>
+          <line class="tun" x1="690" y1="212" x2="720" y2="212"/>
+
+          <!-- hosts -->
+          <rect class="box" x="70" y="80" width="110" height="44" rx="5"/>
+          <text x="125" y="100" text-anchor="middle" class="t-strong">a3</text><text x="125" y="116" text-anchor="middle" class="t-muted">host</text>
+          <rect class="box" x="210" y="80" width="110" height="44" rx="5"/>
+          <text x="265" y="100" text-anchor="middle" class="t-strong">a4</text><text x="265" y="116" text-anchor="middle" class="t-muted">host</text>
+          <rect class="box" x="650" y="80" width="110" height="44" rx="5"/>
+          <text x="705" y="100" text-anchor="middle" class="t-strong">b3</text><text x="705" y="116" text-anchor="middle" class="t-muted">host</text>
+          <!-- relays -->
+          <rect class="box-relay" x="70" y="190" width="110" height="44" rx="5"/>
+          <text x="125" y="210" text-anchor="middle" class="t-strong">a1</text><text x="125" y="226" text-anchor="middle" class="t-muted">host · relaying</text>
+          <rect class="box-relay" x="210" y="190" width="110" height="44" rx="5"/>
+          <text x="265" y="210" text-anchor="middle" class="t-strong">a2</text><text x="265" y="226" text-anchor="middle" class="t-muted">host · relaying</text>
+          <rect class="box-relay" x="580" y="190" width="110" height="44" rx="5"/>
+          <text x="635" y="210" text-anchor="middle" class="t-strong">b1</text><text x="635" y="226" text-anchor="middle" class="t-muted">host · relaying</text>
+          <rect class="box-relay" x="720" y="190" width="110" height="44" rx="5"/>
+          <text x="775" y="210" text-anchor="middle" class="t-strong">b2</text><text x="775" y="226" text-anchor="middle" class="t-muted">host · relaying</text>
+          <text x="46" y="258" class="t-muted">a3, a4 tunnel only to a1, a2</text>
+          <text x="856" y="258" text-anchor="end" class="t-muted">blue border: relaying</text>
+
+          <!-- relay bundle A <-> B -->
+          <line class="tun-bundle" x1="330" y1="212" x2="570" y2="212"/>
+          <text x="450" y="200" text-anchor="middle" class="t-tunnel">4 tunnels: a1, a2 ⇄ b1, b2</text>
+          <text x="450" y="234" text-anchor="middle" class="t-under">carried by VPC peering</text>
+
+          <!-- bare metal -->
+          <rect class="box-relay" x="390" y="370" width="120" height="48" rx="5"/>
+          <text x="450" y="391" text-anchor="middle" class="t-strong">m1</text><text x="450" y="408" text-anchor="middle" class="t-muted">bare metal · own site</text>
+          <line class="tun-bundle" x1="420" y1="370" x2="270" y2="244"/>
+          <line class="tun-bundle" x1="480" y1="370" x2="630" y2="244"/>
+          <text x="330" y="326" text-anchor="end" class="t-tunnel">m1 ⇄ a1, a2</text>
+          <text x="330" y="343" text-anchor="end" class="t-under">Direct Connect · carrier · leased line</text>
+          <text x="570" y="326" class="t-tunnel">m1 ⇄ b1, b2</text>
+          <text x="570" y="343" class="t-under">Direct Connect · carrier · leased line</text>
+
+          <!-- registry -->
+          <rect class="box" x="640" y="370" width="230" height="48" rx="5"/>
+          <text x="656" y="390" class="t-strong">S3 registry</text>
+          <text x="656" y="407" class="t-muted t-mono">hosts/&lt;id&gt;.json · every 60 s</text>
+        </svg>
+      </div>
+      <div class="key">
+        <span><i class="swatch"></i>GRE tunnel; thick lines are bundles of tunnels</span>
+        <span><i class="swatch under"></i><em>italic amber</em>: the underlay path that carries them</span>
+      </div>
+      <figcaption>Most hosts have 2 tunnels: one to each relaying host in their VPC. A relaying host tunnels to every other relaying host and to every host in its own VPC. A bare-metal host is a site of its own, so it always relays for itself. Every host writes its entry to the registry and reads everyone else's; the tunnels follow from that. With a peers file instead, every host reads the same list, and its order picks who relays.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">2</span>Two loops: registry sync and reconcile pass</h2>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 900 266" role="img" aria-label="Every 60 seconds the host publishes its registry entry, lists the registry, and selects relaying hosts and peers. Every 2 seconds it reads the kernel state, plans endpoint pins, tunnels and VPC routes, applies them, takes the NIC inventory and configures babeld.">
+          <defs>
+            <marker id="f2-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="head-fg"/></marker>
+            <marker id="f2-head-t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="head-tunnel"/></marker>
+          </defs>
+          <text x="30" y="34" class="t-lane">every 60 s · registry sync</text>
+          <rect class="box" x="30" y="46" width="200" height="64" rx="5"/>
+          <text x="46" y="70" class="t-strong">1 · Publish</text><text x="46" y="90" class="t-mono t-muted">PUT hosts/&lt;id&gt;.json</text>
+          <rect class="box" x="260" y="46" width="200" height="64" rx="5"/>
+          <text x="276" y="70" class="t-strong">2 · Read</text><text x="276" y="90" class="t-muted">LIST; GET changed entries</text>
+          <rect class="box-relay" x="490" y="46" width="210" height="64" rx="5"/>
+          <text x="506" y="68" class="t-strong">3 · Select</text><text x="506" y="86" class="t-muted">which 2 hosts per site relay</text><text x="506" y="101" class="t-muted">peers for this host</text>
+          <line class="flow" x1="230" y1="78" x2="256" y2="78" marker-end="url(#f2-head)"/>
+          <line class="flow" x1="460" y1="78" x2="486" y2="78" marker-end="url(#f2-head)"/>
+          <text x="720" y="70" class="t-muted">If S3 is down, the last</text>
+          <text x="720" y="86" class="t-muted">selection stays and</text>
+          <text x="720" y="102" class="t-muted">tunnels stay up</text>
+
+          <path class="tun" d="M540 110 C 510 150, 330 150, 300 186" marker-end="url(#f2-head-t)"/>
+          <text x="556" y="146" class="t-tunnel">peers; relaying or not</text>
+
+          <text x="30" y="176" class="t-lane">every 2 s · reconcile pass</text>
+          <rect class="box" x="30" y="188" width="150" height="64" rx="5"/>
+          <text x="44" y="210" class="t-strong">Read state</text><text x="44" y="228" class="t-mono t-muted">ip link, route,</text><text x="44" y="243" class="t-mono t-muted">rule</text>
+          <rect class="box" x="200" y="188" width="150" height="64" rx="5"/>
+          <text x="214" y="210" class="t-strong">Plan</text><text x="214" y="228" class="t-muted">endpoint pins,</text><text x="214" y="243" class="t-muted">tunnels, VPC routes</text>
+          <rect class="box" x="370" y="188" width="150" height="64" rx="5"/>
+          <text x="384" y="210" class="t-strong">Apply</text><text x="384" y="228" class="t-muted">ip commands,</text><text x="384" y="243" class="t-muted">pins first</text>
+          <rect class="box" x="540" y="188" width="150" height="64" rx="5"/>
+          <text x="554" y="210" class="t-strong">Inventory</text><text x="554" y="228" class="t-muted">NICs; on EC2,</text><text x="554" y="243" class="t-muted">tunnels only</text>
+          <rect class="box" x="710" y="188" width="160" height="64" rx="5"/>
+          <text x="724" y="210" class="t-strong">Configure babeld</text><text x="724" y="228" class="t-muted">networks, filters</text><text x="724" y="243" class="t-muted">via vtysh</text>
+          <line class="flow" x1="180" y1="220" x2="196" y2="220" marker-end="url(#f2-head)"/>
+          <line class="flow" x1="350" y1="220" x2="366" y2="220" marker-end="url(#f2-head)"/>
+          <line class="flow" x1="520" y1="220" x2="536" y2="220" marker-end="url(#f2-head)"/>
+          <line class="flow" x1="690" y1="220" x2="706" y2="220" marker-end="url(#f2-head)"/>
+        </svg>
+      </div>
+      <figcaption>The slow loop decides who this host should tunnel to. With a peers file, it re-reads the file instead and publishes nothing. The fast loop makes the kernel and FRR match that, and repairs drift such as an FRR restart within one pass. Failover doesn't wait for either loop: Babel does it between passes.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">3</span>One packet leaving host a1, and why table 4242 exists</h2>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 900 330" role="img" aria-label="An application packet to 10.2.0.13 matches the Babel route in the main table and enters tunnel rdm, which wraps it in GRE addressed to host b1 at 10.2.0.11. The ip rule at priority 4242 sends that GRE packet to table 4242, where the pin sends it to the VPC router on ens5. Without the rule, the GRE packet would match the Babel route again and loop into the tunnel.">
+          <defs>
+            <marker id="f3-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="head-fg"/></marker>
+            <marker id="f3-head-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="head-fail"/></marker>
+          </defs>
+          <text x="30" y="56" class="t-lane">inner packet</text>
+          <rect class="box" x="30" y="66" width="240" height="80" rx="5"/>
+          <text x="46" y="92" class="t-strong">Application on a1</text>
+          <text x="46" y="112" class="t-mono">dst 10.2.0.13 (b3)</text>
+          <text x="46" y="130" class="t-muted">any process, or forwarded</text>
+
+          <rect class="box" x="330" y="66" width="240" height="80" rx="5"/>
+          <text x="346" y="92" class="t-strong">Main table</text>
+          <text x="346" y="112" class="t-mono">10.2.0.0/16 via 169.254.…</text>
+          <text x="346" y="130" class="t-muted">dev rdm…, learned by Babel</text>
+
+          <rect class="box-relay" x="630" y="66" width="240" height="80" rx="5"/>
+          <text x="646" y="92" class="t-strong">GRE tunnel rdm… to b1</text>
+          <text x="646" y="112" class="t-mono">outer 10.1.0.11 → 10.2.0.11</text>
+          <text x="646" y="130" class="t-muted">IP protocol 47</text>
+
+          <line class="flow" x1="270" y1="106" x2="326" y2="106" marker-end="url(#f3-head)"/>
+          <line class="flow" x1="570" y1="106" x2="626" y2="106" marker-end="url(#f3-head)"/>
+
+          <!-- the loop that the rule prevents -->
+          <path class="fail" d="M720 66 C 720 18, 480 18, 480 62" marker-end="url(#f3-head-fail)"/>
+          <text x="600" y="22" text-anchor="middle" class="t-fail">without the rule: 10.2.0.11 matches 10.2.0.0/16 → back into the tunnel</text>
+
+          <text x="30" y="200" class="t-lane">outer GRE packet</text>
+          <rect class="box" x="630" y="210" width="240" height="80" rx="5"/>
+          <text x="646" y="236" class="t-strong">ip rule, priority 4242</text>
+          <text x="646" y="256" class="t-mono">ipproto gre → table 4242</text>
+          <text x="646" y="274" class="t-muted">locally sent GRE only</text>
+
+          <rect class="box-relay" x="330" y="210" width="240" height="80" rx="5"/>
+          <text x="346" y="236" class="t-strong">Table 4242 (endpoint pins)</text>
+          <text x="346" y="256" class="t-mono">10.2.0.11/32 via 10.1.0.1</text>
+          <text x="346" y="274" class="t-muted">best non-Babel route or unreachable</text>
+
+          <rect class="box" x="30" y="210" width="240" height="80" rx="5"/>
+          <text x="46" y="236" class="t-strong">ens5 → VPC router</text>
+          <text x="46" y="256" class="t-mono">route table: pcx-… </text>
+          <text x="46" y="274" class="t-under">over VPC peering to b1</text>
+
+          <line class="flow" x1="750" y1="146" x2="750" y2="206" marker-end="url(#f3-head)"/>
+          <line class="flow" x1="630" y1="250" x2="574" y2="250" marker-end="url(#f3-head)"/>
+          <line class="flow" x1="330" y1="250" x2="274" y2="250" marker-end="url(#f3-head)"/>
+        </svg>
+      </div>
+      <figcaption>Babel learns routes that cover the far end of a tunnel: VPC B's CIDR covers b1's address. So GRE packets look up their own table, which holds one copy per tunnel endpoint of the best route that isn't Babel's and doesn't use a tunnel. If no such route exists, the entry is <code>unreachable</code>: the tunnel goes quiet and Babel routes around it. route-discovery writes the tunnels, the rule and table 4242 every 2 s; Babel (through zebra) writes the main-table route.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">4</span>Failover when a Direct Connect path fails</h2>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 900 330" role="img" aria-label="Normally the bare-metal host m1 reaches host a3 through host a1 over Direct Connect path 1. When that path fails, the tunnel to a1 goes quiet and traffic goes from m1 to host b1 over Direct Connect path 2, then from b1 to a1 over VPC peering, then to a3.">
+          <!-- panel 1: normal -->
+          <g>
+            <text x="30" y="24" class="t-lane">normal</text>
+            <line class="native" x1="90" y1="96" x2="90" y2="164"/>
+            <line class="active" x1="170" y1="285" x2="110" y2="208"/>
+            <line class="idle" x1="230" y1="285" x2="290" y2="208"/>
+            <line class="idle" x1="150" y1="186" x2="250" y2="186"/>
+            <rect class="box" x="30" y="56" width="120" height="40" rx="5"/>
+            <text x="90" y="81" text-anchor="middle" class="t-strong">a3 · host</text>
+            <rect class="box-relay" x="30" y="164" width="120" height="44" rx="5"/>
+            <text x="90" y="191" text-anchor="middle" class="t-strong">a1 · host</text>
+            <rect class="box-relay" x="250" y="164" width="120" height="44" rx="5"/>
+            <text x="310" y="191" text-anchor="middle" class="t-strong">b1 · host</text>
+            <rect class="box-relay" x="140" y="285" width="120" height="40" rx="5"/>
+            <text x="200" y="310" text-anchor="middle" class="t-strong">m1</text>
+            <text x="100" y="134" class="t-muted">VPC A fabric</text>
+            <text x="200" y="176" text-anchor="middle" class="t-under">peering</text>
+            <text x="128" y="262" text-anchor="end" class="t-under">DX path 1</text>
+            <text x="272" y="262" class="t-under">DX path 2</text>
+          </g>
+          <!-- divider -->
+          <line x1="450" y1="20" x2="450" y2="320" stroke="var(--line)" stroke-width="1"/>
+          <!-- panel 2: DX path 1 down -->
+          <g transform="translate(480 0)">
+            <text x="30" y="24" class="t-lane">DX path 1 down</text>
+            <line class="active" x1="90" y1="96" x2="90" y2="164"/>
+            <line class="fail" x1="170" y1="285" x2="110" y2="208"/>
+            <line class="active" x1="230" y1="285" x2="290" y2="208"/>
+            <line class="active" x1="250" y1="186" x2="150" y2="186"/>
+            <line class="cross" x1="132" y1="238" x2="148" y2="254"/>
+            <line class="cross" x1="148" y1="238" x2="132" y2="254"/>
+            <rect class="box" x="30" y="56" width="120" height="40" rx="5"/>
+            <text x="90" y="81" text-anchor="middle" class="t-strong">a3 · host</text>
+            <rect class="box-relay" x="30" y="164" width="120" height="44" rx="5"/>
+            <text x="90" y="191" text-anchor="middle" class="t-strong">a1 · host</text>
+            <rect class="box-relay" x="250" y="164" width="120" height="44" rx="5"/>
+            <text x="310" y="191" text-anchor="middle" class="t-strong">b1 · host</text>
+            <rect class="box-relay" x="140" y="285" width="120" height="40" rx="5"/>
+            <text x="200" y="310" text-anchor="middle" class="t-strong">m1</text>
+            <text x="100" y="134" class="t-muted">VPC A fabric</text>
+            <text x="200" y="176" text-anchor="middle" class="t-under">peering</text>
+            <text x="120" y="272" text-anchor="end" class="t-fail">hellos stop</text>
+            <text x="272" y="262" class="t-under">DX path 2</text>
+            <text x="200" y="136" class="t-tunnel">m1 → b1 → a1 → a3</text>
+            <text x="200" y="152" class="t-muted">seconds after the last hello</text>
+          </g>
+        </svg>
+      </div>
+      <div class="key">
+        <span><i class="swatch"></i>path in use (GRE)</span>
+        <span><i class="swatch native"></i>delivered on the VPC fabric</span>
+        <span><i class="swatch fail"></i>tunnel whose underlay failed</span>
+      </div>
+      <figcaption>m1 keeps tunnels to every VPC's relaying hosts, each carried by whichever Direct Connect path the carrier uses for that VPC. When path 1 fails, Babel stops hearing a1 over its tunnel and switches to the route via b1. b1 re-wraps the traffic to a1 over peering. Peering only ever sees GRE between two hosts, which is why the VPC peering restriction on passing traffic through doesn't apply. When path 1 returns, Babel moves back to the direct route.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">5</span>What each kind of host does</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Host</th><th>Tunnels to</th><th>Babel runs on</th><th>Advertises</th><th>Never learns</th></tr></thead>
+        <tbody>
+          <tr><td>EC2 host, relaying</td><td>Every other relaying host; every host in its VPC</td><td>Tunnels only</td><td>Its VPC's CIDRs, plus other sites' routes (transit)</td><td>Its own VPC's CIDRs</td></tr>
+          <tr><td>Other EC2 host</td><td>Its VPC's 2 relaying hosts</td><td>Tunnels only</td><td>Nothing</td><td>Its own VPC's CIDRs</td></tr>
+          <tr><td>Bare metal</td><td>Every relaying host of every VPC</td><td>Tunnels and its NICs</td><td>Connected subnets, plus transit</td><td>Nothing extra</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The relaying hosts are each site's two hosts with the oldest registry entries that are still sending heartbeats. A new host never takes over; a relaying host is replaced after it misses 5 registry syncs (5 minutes by default), and takes the role back when it returns. With a peers file, they are each site's first two hosts in the file, and a dead one stays chosen until the file changes.</p>
+  </section>
+
+  <footer>Drawn from the code on <code>main</code> in willsc/Routing-Discovery (<code>src/mesh/overlay/</code>) and <code>docs/overlay.md</code>. Addresses are examples. The overlay has only been tested against fakes so far.</footer>
+</main>
+</html>
