@@ -1,0 +1,39 @@
+[Unit]
+Description=Zero-configuration BGP over Direct Connect virtual interfaces
+Wants=network-online.target frr.service
+After=network-online.target frr.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=300
+User=route-discovery
+Group=route-discovery
+SupplementaryGroups=frrvty frr
+# VLAN links for VIFs on --parent mapped interfaces.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+StateDirectory=route-discovery-dx
+StateDirectoryMode=0700
+# frr-reload.py logs here.
+ReadWritePaths=/var/log/frr
+# AWS credentials: a profile (for example IAM Roles Anywhere via credential_process) or environment.
+EnvironmentFile=-/etc/default/route-discovery-dx
+ExecStart=/usr/local/bin/route-discovery dx run --apply $DX_ARGS
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target

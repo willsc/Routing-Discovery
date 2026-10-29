@@ -44,11 +44,11 @@ fn v(net: &IpNet) -> u8 {
     }
 }
 
-/// Most common local ASN; others use `local-as` per neighbor.
-pub fn router_asn(neighbors: &[Neighbor]) -> Option<u32> {
+/// Most common local ASN (lowest on a tie); others use `local-as` per neighbor.
+pub fn router_asn(local_asns: impl IntoIterator<Item = u32>) -> Option<u32> {
     let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
-    for n in neighbors {
-        *counts.entry(n.local_asn).or_default() += 1;
+    for asn in local_asns {
+        *counts.entry(asn).or_default() += 1;
     }
     counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|(asn, _)| asn)
 }
@@ -93,7 +93,7 @@ pub fn render(plan: &Plan) -> String {
         ]);
     }
     lines.extend(["route-map RDB-DENY deny 10".into(), "exit".into(), "!".into()]);
-    let Some(asn) = router_asn(plan.neighbors) else {
+    let Some(asn) = router_asn(plan.neighbors.iter().map(|n| n.local_asn)) else {
         return lines.join("\n") + "\n";
     };
     lines.extend([

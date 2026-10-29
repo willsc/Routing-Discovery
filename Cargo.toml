@@ -1,34 +1,32 @@
 [package]
 name = "route-discovery"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
-description = "Health-driven routing and a self-hosted BGP-to-VPC route server"
+description = "Zero-configuration routing for AWS and on-prem networks, driving FRR"
 license = "MIT"
 publish = false
 
 [features]
 default = ["aws"]
-# Direct EC2 API control (host `aws` backend and route-server `--apply`).
-aws = ["dep:aws-config", "dep:aws-sdk-ec2"]
+# AWS SDK clients: EC2 (bgp role) and Direct Connect (dx role).
+aws = ["dep:aws-config", "dep:aws-sdk-ec2", "dep:aws-sdk-directconnect"]
 
 [dependencies]
 async-trait = "0.1"
 aws-config = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio", "credentials-process", "sso"] }
+aws-sdk-directconnect = { version = "1", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
 aws-sdk-ec2 = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
 clap = { version = "4", features = ["derive"] }
 fastrand = "2"
 futures = "0.3"
 ipnet = { version = "2", features = ["serde"] }
 libc = "0.2"
-rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-socket2 = { version = "0.6", features = ["all"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

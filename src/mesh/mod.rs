@@ -212,7 +212,7 @@ pub async fn run(options: Options) -> Result<()> {
     let mut lock = StateStore::new(&directory);
     lock.acquire()?;
     let mesh = Arc::new(Mesh::new(options, Arc::new(SystemRunner)));
-    crate::server::stop_on_signals(mesh.stop.clone())?;
+    crate::supervision::stop_on_signals(mesh.stop.clone())?;
     let result = mesh.run().await;
     lock.close();
     result

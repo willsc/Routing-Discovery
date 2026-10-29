@@ -399,7 +399,7 @@ pub async fn run(options: Options) -> Result<()> {
     lock.acquire()?;
     let options = Options { state_dir: directory, ..options };
     let controller = Arc::new(system(options).await?);
-    crate::server::stop_on_signals(controller.stop.clone())?;
+    crate::supervision::stop_on_signals(controller.stop.clone())?;
     let result = controller.run().await;
     lock.close();
     result

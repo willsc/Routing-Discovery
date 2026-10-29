@@ -1,4 +1,4 @@
-//! Minimal systemd notifications; no third-party daemon dependency.
+//! Minimal systemd notifications and signal handling; no third-party daemon dependency.
 
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
@@ -18,4 +18,19 @@ pub fn notify(message: &str) {
     if let Err(e) = result {
         tracing::warn!("systemd notify failed: {e}");
     }
+}
+
+/// Stop on SIGINT/SIGTERM.
+pub fn stop_on_signals(stop: tokio_util::sync::CancellationToken) -> crate::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {}
+            _ = terminate.recv() => {}
+        }
+        stop.cancel();
+    });
+    Ok(())
 }

@@ -1,28 +1,19 @@
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use route_discovery::backends::{make_backend, probe_plan, validate_probe_paths};
 use route_discovery::bgp;
 use route_discovery::commands::SystemRunner;
-use route_discovery::config::{load, BackendKind, Config};
-use route_discovery::daemon::Daemon;
+use route_discovery::dx;
 use route_discovery::error::{config_err, Error, Result};
-use route_discovery::frr_export::frr_config;
-use route_discovery::mesh::{self, frr::Policy, frr::Vtysh, inventory::collect, inventory::Filter};
-use route_discovery::policy::{Action, Decision};
-use route_discovery::server;
+use route_discovery::mesh::{self, frr::Policy, frr::Vtysh, inventory::collect, inventory::Filter, inventory::DEFAULT_EXCLUDE};
 use route_discovery::state::StateStore;
 
 #[derive(Parser)]
-#[command(
-    name = "route-discovery",
-    version,
-    about = "Health-driven Linux/AWS routing, FRR BGP integration and a zero-configuration Babel mesh"
-)]
+#[command(name = "route-discovery", version, about = "Zero-configuration routing: discover peers and prefixes, drive FRR")]
 struct Cli {
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
     log_level: LogLevel,
@@ -41,79 +32,28 @@ enum LogLevel {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Validate a host-routing configuration
-    Validate {
-        #[arg(short, long)]
-        config: PathBuf,
-    },
-    /// Print a reviewable shell script that provisions probe routing tables
-    ProbePlan {
-        #[arg(short, long)]
-        config: PathBuf,
-    },
-    /// Verify each probe is pinned to its candidate's path
-    CheckPaths {
-        #[arg(short, long)]
-        config: PathBuf,
-    },
-    /// Run the health-routing daemon
-    Run {
-        #[arg(short, long)]
-        config: PathBuf,
-        /// Write live routes (default is in-memory dry-run)
-        #[arg(long)]
-        apply: bool,
-    },
-    /// Render an FRR fragment that exports this daemon's tagged statics via BGP
-    RenderFrr {
-        #[arg(short, long)]
-        config: PathBuf,
-        #[arg(long)]
-        router_id: String,
-        #[arg(long)]
-        peer: String,
-        #[arg(long)]
-        peer_asn: i64,
-        #[arg(long, default_value_t = 100)]
-        med: i64,
-    },
-    /// Withdraw FRR runtime statics (systemd ExecStopPost)
-    CleanupFrr {
-        #[arg(short, long)]
-        config: PathBuf,
-        #[arg(long)]
-        apply: bool,
-    },
-    /// Print a running daemon's status
-    Status {
-        #[arg(long, default_value = "http://127.0.0.1:9808/status")]
-        url: String,
-    },
-    /// Deterministic failover/failback simulation, with no network changes
-    Demo,
-    /// Zero-configuration BGP to VPC Route Server and Transit Gateway Connect
+    /// EC2 instance: BGP to VPC Route Server and Transit Gateway Connect
     Bgp {
         operation: BgpOperation,
         #[command(flatten)]
         args: BgpArgs,
     },
-    /// Zero-configuration Babel mesh over every eligible NIC (FRR babeld)
+    /// On-prem router: BGP over Direct Connect private and transit VIFs
+    Dx {
+        operation: DxOperation,
+        #[command(flatten)]
+        args: DxArgs,
+    },
+    /// On-prem or LAN segments: Babel mesh over every eligible NIC
     Mesh {
         operation: MeshOperation,
         #[command(flatten)]
         args: MeshArgs,
     },
-    /// BGP-to-VPC route-server control plane
-    Server {
-        operation: ServerOperation,
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-        /// Endpoint ID for render-frr
-        #[arg(long)]
-        endpoint: Option<String>,
-        /// Perform AWS route writes
-        #[arg(long)]
-        apply: bool,
+    /// Print a running controller's status
+    Status {
+        #[arg(long, default_value = "http://127.0.0.1:9811/status")]
+        url: String,
     },
 }
 
@@ -228,39 +168,60 @@ struct MeshArgs {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ServerOperation {
-    Validate,
+enum DxOperation {
+    /// Print this router's VIFs, VLAN links and announced prefixes (JSON)
+    Discover,
+    /// Print the bgpd configuration derived from discovery (includes MD5 keys)
     RenderFrr,
+    /// Print VLAN commands and the bgpd changes a reload would make
+    Plan,
+    /// Keep VLAN links and bgpd in step with Direct Connect and local interfaces
     Run,
-    Demo,
+    /// Remove the VIF sessions and owned VLAN links
     Withdraw,
 }
 
-async fn run_daemon(config: Config, apply: bool) -> Result<()> {
-    // Dry runs have a separate lock/checkpoint; they cannot reset live dampening state.
-    let directory = if apply { config.state_dir.clone() } else { config.state_dir.join("dry-run") };
-    let mut store = StateStore::new(directory);
-    store.acquire()?;
-    let backend = make_backend(&config, apply).await?;
-    let daemon = Arc::new(Daemon::new(config, backend).with_store(store).with_apply(apply));
-    server::stop_on_signals(daemon.stop.clone())?;
-    daemon.run().await
-}
-
-/// systemd ExecStopPost also runs after SIGKILL/watchdog failures.
-async fn cleanup(config: Config) -> Result<()> {
-    if config.backend.kind != BackendKind::Frr {
-        return Ok(());
-    }
-    let mut store = StateStore::new(&config.state_dir);
-    store.acquire()?;
-    let backend = make_backend(&config, true).await?;
-    for route in &config.routes {
-        if !backend.apply(route, &Decision::new(Action::Withdraw, "supervisor cleanup")).await? {
-            return Err(Error::Backend(format!("FRR withdrawal did not converge: {}", route.prefix)));
-        }
-    }
-    Ok(())
+#[derive(clap::Args)]
+struct DxArgs {
+    /// Region to read VIFs from (repeatable; default from the AWS configuration chain)
+    #[arg(long = "region", value_name = "REGION")]
+    regions: Vec<String>,
+    /// Provision VLAN links for a connection or LAG's VIFs on a parent interface
+    #[arg(long = "parent", value_name = "IFACE=DXCON")]
+    parents: Vec<String>,
+    /// Only announce subnets on interfaces matching these globs
+    #[arg(long = "include", value_name = "GLOB")]
+    include: Vec<String>,
+    /// Additional interface globs whose subnets are never announced
+    #[arg(long = "exclude", value_name = "GLOB")]
+    exclude: Vec<String>,
+    /// Extra prefix to announce, such as an on-prem aggregate present in the RIB (repeatable)
+    #[arg(long = "announce", value_name = "PREFIX")]
+    announce: Vec<String>,
+    /// Accept a default route from AWS
+    #[arg(long)]
+    accept_default_route: bool,
+    /// Do not enable BFD on VIF sessions
+    #[arg(long)]
+    no_bfd: bool,
+    #[arg(long, default_value_t = 4)]
+    maximum_paths: u8,
+    #[arg(long, default_value = "/usr/lib/frr/frr-reload.py")]
+    frr_reload: String,
+    #[arg(long)]
+    vty_socket: Option<String>,
+    /// Seconds between discovery passes (each pass calls the Direct Connect API)
+    #[arg(long, default_value_t = 30.0)]
+    interval: f64,
+    #[arg(long, default_value = "127.0.0.1")]
+    listen: std::net::IpAddr,
+    #[arg(long, default_value_t = 9812)]
+    port: u16,
+    #[arg(long, default_value = "/var/lib/route-discovery-dx")]
+    state_dir: PathBuf,
+    /// Create VLAN links and reload bgpd (default is dry-run)
+    #[arg(long)]
+    apply: bool,
 }
 
 fn bgp_options(args: BgpArgs) -> Result<bgp::Options> {
@@ -392,36 +353,84 @@ async fn mesh_command(operation: MeshOperation, args: MeshArgs) -> Result<()> {
     Ok(())
 }
 
-async fn server_command(
-    operation: ServerOperation,
-    config: Option<PathBuf>,
-    endpoint: Option<String>,
-    apply: bool,
-) -> Result<()> {
-    if operation == ServerOperation::Demo {
-        return server::demo::demo().await;
+fn dx_options(args: DxArgs) -> Result<dx::Options> {
+    if !(args.interval.is_finite() && args.interval >= 10.0) {
+        return config_err("--interval must be at least 10 seconds to stay within Direct Connect API rate limits");
     }
-    let Some(path) = config else { return config_err("server operation requires --config") };
-    let config = server::config::load(path)?;
+    if !(1..=64).contains(&args.maximum_paths) {
+        return config_err("--maximum-paths must be 1-64");
+    }
+    let mut ports = BTreeMap::new();
+    for port in &args.parents {
+        let Some((interface, connection)) = port.split_once('=').filter(|(i, c)| !i.is_empty() && !c.is_empty()) else {
+            return config_err(format!("--parent {port}: expected IFACE=dxcon-... or IFACE=dxlag-..."));
+        };
+        if !(connection.starts_with("dxcon-") || connection.starts_with("dxlag-")) {
+            return config_err(format!("--parent {port}: {connection} is not a connection or LAG ID"));
+        }
+        if ports.insert(connection.to_string(), interface.to_string()).is_some() {
+            return config_err(format!("--parent: {connection} mapped twice"));
+        }
+    }
+    let announce = args
+        .announce
+        .iter()
+        .map(|p| p.parse::<ipnet::IpNet>().map_err(|_| Error::Config(format!("invalid --announce prefix {p}"))))
+        .collect::<Result<Vec<_>>>()?;
+    if announce.iter().any(|n| n.prefix_len() == 0) {
+        return config_err("--announce must not include a default route");
+    }
+    let mut filter = Filter { include: args.include, exclude: DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect() };
+    filter.exclude.extend(args.exclude);
+    Ok(dx::Options {
+        regions: args.regions,
+        ports,
+        filter,
+        announce,
+        policy: dx::frr::Policy {
+            bfd: !args.no_bfd,
+            accept_default: args.accept_default_route,
+            maximum_paths: args.maximum_paths,
+        },
+        frr_reload: args.frr_reload,
+        vty_socket: args.vty_socket,
+        interval: args.interval,
+        listen: args.listen,
+        port: args.port,
+        state_dir: args.state_dir,
+        apply: args.apply,
+    })
+}
+
+async fn dx_command(operation: DxOperation, args: DxArgs) -> Result<()> {
+    let options = dx_options(args)?;
+    if operation == DxOperation::Run {
+        return dx::run(options).await;
+    }
+    if operation == DxOperation::Withdraw && !options.apply {
+        return config_err("dx withdraw requires --apply");
+    }
+    // Plan and withdraw write bgpd.conf in the state directory; discovery only reads.
+    let mut store = StateStore::new(&options.state_dir);
+    if matches!(operation, DxOperation::Plan | DxOperation::Withdraw) {
+        store.acquire()?;
+    }
+    let controller = dx::system(options).await?;
     match operation {
-        ServerOperation::Validate => println!(
-            "Valid route server {}: {} endpoints, {} peers, {} propagations",
-            config.id,
-            config.endpoints.len(),
-            config.peers.len(),
-            config.propagations.len()
-        ),
-        ServerOperation::RenderFrr => {
-            let Some(endpoint) = endpoint else { return config_err("render-frr requires --endpoint") };
-            print!("{}", server::frr::render(&config, &endpoint)?);
+        DxOperation::Discover => {
+            let observation = controller.observe().await?;
+            println!("{}", serde_json::to_string_pretty(&observation).unwrap_or_default());
         }
-        ServerOperation::Withdraw if !apply => {
-            return config_err("server withdraw requires --apply and an existing ownership journal");
+        DxOperation::RenderFrr => print!("{}", controller.observe().await?.config),
+        DxOperation::Plan => {
+            let observation = controller.observe().await?;
+            for command in &observation.link_commands {
+                println!("{}", command.join(" "));
+            }
+            print!("{}", controller.diff(&observation.config).await?);
         }
-        ServerOperation::Run | ServerOperation::Withdraw => {
-            server::run(config, apply, operation == ServerOperation::Withdraw).await?;
-        }
-        ServerOperation::Demo => unreachable!(),
+        DxOperation::Withdraw => dx::withdraw(&controller).await?,
+        DxOperation::Run => unreachable!(),
     }
     Ok(())
 }
@@ -429,48 +438,13 @@ async fn server_command(
 async fn execute(command: Command) -> Result<()> {
     match command {
         Command::Bgp { operation, args } => bgp_command(operation, args).await,
+        Command::Dx { operation, args } => dx_command(operation, args).await,
         Command::Mesh { operation, args } => mesh_command(operation, args).await,
-        Command::Server { operation, config, endpoint, apply } => server_command(operation, config, endpoint, apply).await,
-        Command::Demo => {
-            route_discovery::demo::run_demo();
-            Ok(())
-        }
         Command::Status { url } => {
             let body = route_discovery::http::get(&url).await?;
             let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| Error::Backend(e.to_string()))?;
             println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
             Ok(())
-        }
-        Command::Validate { config } => {
-            let config = load(config)?;
-            let paths: usize = config.routes.iter().map(|r| r.candidates.len()).sum();
-            println!("Valid: {} prefixes, {paths} paths, backend={}", config.routes.len(), config.backend.kind.as_str());
-            Ok(())
-        }
-        Command::ProbePlan { config } => {
-            print!("{}", probe_plan(&load(config)?)?);
-            Ok(())
-        }
-        Command::CheckPaths { config } => {
-            let config = load(config)?;
-            validate_probe_paths(&config, &SystemRunner).await?;
-            if config.backend.kind == BackendKind::Aws {
-                println!("AWS external probe paths require validation at their vantage points");
-            } else {
-                println!("Probe routing checks passed");
-            }
-            Ok(())
-        }
-        Command::RenderFrr { config, router_id, peer, peer_asn, med } => {
-            print!("{}", frr_config(&load(config)?, &router_id, &peer, peer_asn, med)?);
-            Ok(())
-        }
-        Command::Run { config, apply } => run_daemon(load(config)?, apply).await,
-        Command::CleanupFrr { config, apply } => {
-            if !apply {
-                return config_err("cleanup-frr requires --apply");
-            }
-            cleanup(load(config)?).await
         }
     }
 }
@@ -507,5 +481,14 @@ fn main() -> ExitCode {
             eprintln!("route-discovery: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cli_is_well_formed() {
+        use clap::CommandFactory;
+        super::Cli::command().debug_assert();
     }
 }

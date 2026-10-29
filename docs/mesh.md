@@ -68,7 +68,7 @@ route-discovery status --url http://127.0.0.1:9810/status
 
 Optional flags: `--include`/`--exclude GLOB` (repeatable), `--accept PREFIX` (repeatable; replaces the defaults), `--hello-interval-ms` (default 1000), `--update-interval-ms` (default 4000), `--vty-socket DIR`, `--interval` (seconds between passes, default 2), `--listen`, `--port` (default 9810) and `--state-dir`.
 
-Babel detects a lost neighbour after a few missed hellos; at a 1 s hello interval, expect seconds, not milliseconds. Babel's own link-quality estimate replaces the TCP probes used by the configured modes.
+Babel detects a lost neighbour after a few missed hellos; at a 1 s hello interval, expect seconds, not milliseconds. Babel's own link-quality estimate decides path cost.
 
 ## Prerequisites
 

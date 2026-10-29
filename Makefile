@@ -1,4 +1,4 @@
-.PHONY: build test validate demo kernel-test frr-test lint
+.PHONY: build test lint render
 
 BIN := target/debug/route-discovery
 
@@ -8,23 +8,12 @@ build:
 test:
 	cargo test
 
-validate: build
-	$(BIN) validate -c examples/linux.toml
-	$(BIN) validate -c examples/aws.toml
-	$(BIN) validate -c examples/frr.toml
-	$(BIN) server validate -c examples/route-server.toml
-	$(BIN) mesh render-frr > /dev/null
-
-demo: build
-	$(BIN) demo
-	$(BIN) server demo
-
-kernel-test:
-	cargo test --test kernel_smoke -- --ignored --nocapture
-
-frr-test:
-	cargo test --test frr_smoke -- --ignored --nocapture
-
 lint:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
+	cargo clippy --no-default-features --all-targets -- -D warnings
+
+# Review what this host would mesh; needs no FRR or AWS access.
+render: build
+	$(BIN) mesh inventory
+	$(BIN) mesh render-frr
