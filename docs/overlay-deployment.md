@@ -6,6 +6,8 @@ Nothing in the overlay has run against real AWS, kernels or FRR yet; only agains
 
 ## 0. Plan before you start
 
+**Registry or peers file.** This runbook uses the S3 registry. If you would rather hosts hold no AWS credentials, use a peers file instead; section 3.5 lists what changes.
+
 **Relays are chosen by seniority.** In each VPC, the first two hosts to start the service with `--apply` become its relays, and stay relays until they stop. Relays carry all of their VPC's traffic to other sites, so start the hosts you want as relays first, and size them for that traffic.
 
 **Turning the overlay on changes traffic paths.** Traffic from a host in VPC A to a host in VPC B stops going directly over peering. It goes host → A relay → B relay → host, through tunnels. Measure throughput through the relays during the pilot (section 6.4).
@@ -251,6 +253,20 @@ Source/destination check still has to be turned off on each new instance (see 2.
 ### 3.4 Bare-metal fleets
 
 Use whatever already manages those hosts (Ansible, Salt, Puppet) to repeat the bare-metal steps from 3.1: the signing helper, `aws-config`, `install-mesh.sh` with the bare-metal flags, then the host's own certificate and key. `aws-config` is the same on every host; each host needs its own certificate.
+
+### 3.5 With a peers file instead of the registry
+
+Skip 1's S3 upload, and 2.1 to 2.4: no bucket, IAM role or Roles Anywhere. Section 2.5 (network) still applies.
+
+1. Write the list, starting from [`deploy/peers.example.json`](../deploy/peers.example.json). Put each VPC's intended relays first; file order picks them. Keep it in your configuration repository.
+2. Install on each host with the file and a local or `https://` binary:
+   ```bash
+   sudo ./install-mesh.sh --peers-file peers.json --binary ./route-discovery [--platform metal]
+   ```
+   It is installed as `/etc/route-discovery/peers.json`.
+3. To add or remove a host later, update the file on every host (for example with Ansible). Hosts pick up the change within `--registry-interval`; nothing restarts.
+
+Bring-up order (section 5) no longer matters: relays come from the file, not from start order. In section 6.1, `aws s3 ls` doesn't apply; `route-discovery status` shows the relays the file selects.
 
 ## 4. Preview (changes nothing)
 

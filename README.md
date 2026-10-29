@@ -1,6 +1,6 @@
 # route-discovery
 
-Zero-configuration routing for hosts in AWS and outside it. There are no routing configuration files and no edge router. Every host runs the daemon: it discovers its interfaces, addresses and peers from the host, from AWS and from a shared S3 registry, then drives [FRR](https://frrouting.org), which speaks Babel, BGP and BFD. Hosts build GRE tunnels to each other across VPC peering, Direct Connect and leased lines and run Babel over them, so when a path fails, routing on the hosts reconfigures itself.
+Zero-configuration routing for hosts in AWS and outside it. There are no routing configuration files and no edge router. Every host runs the daemon: it discovers its interfaces, addresses and peers from the host, from AWS and from a shared S3 registry (or a peers file you distribute), then drives [FRR](https://frrouting.org), which speaks Babel, BGP and BFD. Hosts build GRE tunnels to each other across VPC peering, Direct Connect and leased lines and run Babel over them, so when a path fails, routing on the hosts reconfigures itself.
 
 ![How the overlay hangs together: who tunnels to whom, the registry and reconcile loops, how a packet leaves through a tunnel, and failover when a Direct Connect path fails](docs/images/overlay.svg)
 
@@ -8,7 +8,7 @@ To set up the registry and install the daemon on your hosts, see the [deployment
 
 | Role | Runs on | Discovers from | Speaks | Announces |
 | --- | --- | --- | --- | --- |
-| [`mesh`](docs/mesh.md) | Every host, EC2 or bare metal | Local NICs (`ip -json addr`); with `--registry`, IMDS and the [S3 registry](docs/overlay.md) | Babel, over GRE tunnels between sites | EC2 relays: their VPC's CIDRs. Bare metal: connected subnets. Container and bridge subnets are withheld |
+| [`mesh`](docs/mesh.md) | Every host, EC2 or bare metal | Local NICs (`ip -json addr`); with `--registry`, IMDS and the [S3 registry](docs/overlay.md), or a static [peers file](docs/overlay.md#without-s3-a-peers-file) | Babel, over GRE tunnels between sites | EC2 relays: their VPC's CIDRs. Bare metal: connected subnets. Container and bridge subnets are withheld |
 | [`bgp`](docs/bgp.md) | EC2 instances | IMDSv2; EC2 Route Server and TGW Connect peers that name its ENIs | BGP to VPC Route Server (with BFD) and TGW Connect (over GRE) | Service addresses outside the VPC CIDRs, such as VIPs on `lo` or `dummy` |
 | [`dx`](docs/dx.md) | A host outside AWS that terminates Direct Connect VIFs itself | Direct Connect API: its private/transit VIFs, VLANs, peer addresses, ASNs, MD5 keys | BGP (with BFD) on every VIF | Its connected subnets and optional aggregates, capped at AWS's 100-prefix VIF limit |
 

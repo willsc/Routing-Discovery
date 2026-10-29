@@ -66,7 +66,7 @@ route-discovery mesh withdraw --apply     # remove the babeld instance and RDM-*
 route-discovery status --url http://127.0.0.1:9810/status
 ```
 
-Overlay flags, all needing `--registry`: `--registry-region`, `--platform auto|ec2|metal`, `--site`, `--endpoint`, `--relays` (default 2), `--registry-interval` (default 60 s) and `--tunnel-mtu` (default 1476).
+Instead of `--registry`, `--peers-file PATH` takes a static JSON list of hosts and needs no AWS credentials; see [GRE overlay](overlay.md#without-s3-a-peers-file). Overlay flags, all needing one of the two: `--platform auto|ec2|metal`, `--endpoint`, `--relays` (default 2), `--registry-interval` (default 60 s) and `--tunnel-mtu` (default 1476). `--registry-region` and `--site` apply to the registry only.
 
 Optional flags: `--include`/`--exclude GLOB` (repeatable), `--accept PREFIX` (repeatable; replaces the defaults), `--hello-interval-ms` (default 1000), `--update-interval-ms` (default 4000), `--vty-socket DIR`, `--interval` (seconds between passes, default 2), `--listen`, `--port` (default 9810) and `--state-dir`.
 

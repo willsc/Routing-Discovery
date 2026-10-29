@@ -3,8 +3,13 @@
 # Safe to re-run: every step checks before it changes anything. Debian 12 and Ubuntu 22.04/24.04.
 #
 #   install-mesh.sh --registry s3://BUCKET/PREFIX --region REGION --binary SOURCE [options]
+#   install-mesh.sh --peers-file FILE --binary SOURCE [options]
 #
 # Options:
+#   --registry URL      S3 registry; hosts need AWS credentials for it
+#   --region REGION     the registry bucket's region (with --registry)
+#   --peers-file FILE   static JSON list of hosts instead of the registry; installed as
+#                       /etc/route-discovery/peers.json, which the daemon re-reads every minute
 #   --binary SOURCE     the route-discovery binary: a local path, an https:// URL or an s3:// URL
 #                       (s3:// needs the AWS CLI). A matching SOURCE.sha256 is checked when present.
 #   --platform metal    on bare metal; skips the 5 s IMDS probe at every start
@@ -13,13 +18,15 @@
 #   --aws-config FILE   bare metal: AWS config file holding that profile
 #   --extra "ARGS"      further mesh flags, for example "--exclude mgmt0"
 #   --start             enable and start the service now (default: install only)
+
 set -euo pipefail
 
-registry="" region="" binary="" platform="" endpoint="" profile="" config="" extra="" start=0
+registry="" peers="" region="" binary="" platform="" endpoint="" profile="" config="" extra="" start=0
 while (($#)); do
   case "$1" in
     --registry) registry="$2"; shift 2 ;;
     --region) region="$2"; shift 2 ;;
+    --peers-file) peers="$2"; shift 2 ;;
     --binary) binary="$2"; shift 2 ;;
     --platform) platform="$2"; shift 2 ;;
     --endpoint) endpoint="$2"; shift 2 ;;
@@ -27,15 +34,18 @@ while (($#)); do
     --aws-config) config="$2"; shift 2 ;;
     --extra) extra="$2"; shift 2 ;;
     --start) start=1; shift ;;
-    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,/^$/p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
 log() { echo "install-mesh: $*"; }
 die() { echo "install-mesh: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "run as root"
-[[ $registry == s3://*/* ]] || die "--registry s3://BUCKET/PREFIX is required"
-[[ -n $region ]] || die "--region is required"
+[[ -n $registry || -n $peers ]] || die "--registry s3://BUCKET/PREFIX or --peers-file FILE is required"
+[[ -z $registry || -z $peers ]] || die "--registry and --peers-file are alternatives"
+[[ -z $registry || $registry == s3://*/* ]] || die "--registry must be s3://BUCKET/PREFIX"
+[[ -z $registry || -n $region ]] || die "--region is required with --registry"
+[[ -z $peers || -r $peers ]] || die "cannot read $peers"
 [[ -n $binary ]] || die "--binary is required"
 [[ -z $profile || -n $config ]] || die "--aws-profile needs --aws-config"
 [[ -z $config || -r $config ]] || die "cannot read $config"
@@ -82,7 +92,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fetch() {
   case "$1" in
-    s3://*) aws s3 cp --only-show-errors --region "$region" "$1" "$2" ;;
+    s3://*) aws s3 cp --only-show-errors ${region:+--region "$region"} "$1" "$2" ;;
     https://*) curl -fsSL -o "$2" "$1" ;;
     *) cp "$1" "$2" ;;
   esac
@@ -104,7 +114,14 @@ else
   install -m 0644 "$tmp/unit" "$unit"
 fi
 
-args="--registry $registry --registry-region $region"
+if [[ -n $peers ]]; then
+  install -d -m 0750 -g route-discovery /etc/route-discovery
+  [[ $peers -ef /etc/route-discovery/peers.json ]] ||
+    install -m 0640 -g route-discovery "$peers" /etc/route-discovery/peers.json
+  args="--peers-file /etc/route-discovery/peers.json"
+else
+  args="--registry $registry --registry-region $region"
+fi
 [[ -n $platform ]] && args+=" --platform $platform"
 [[ -n $endpoint ]] && args+=" --endpoint $endpoint"
 [[ -n $extra ]] && args+=" $extra"

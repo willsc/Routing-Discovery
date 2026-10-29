@@ -17,9 +17,35 @@ Each host writes one JSON object to `s3://bucket/prefix/hosts/<host>.json`: its 
   - Bare metal: `metal-` plus the first 16 characters of `/etc/machine-id`; the site is the host itself; the endpoint is the source address of the default path.
   - `--site` and `--endpoint` override these. `--platform ec2|metal` skips the IMDS probe.
 
+### Without S3: a peers file
+
+`--peers-file /etc/route-discovery/peers.json` replaces the registry with a static list that you push to every host, for example with Ansible. Hosts then need no AWS credentials and no IAM role at all. An example is in [`deploy/peers.example.json`](../deploy/peers.example.json):
+
+```json
+[
+  {"host": "a1", "endpoint": "10.1.0.11", "site": "vpc-a"},
+  {"host": "a2", "endpoint": "10.1.0.12", "site": "vpc-a"},
+  {"host": "a3", "endpoint": "10.1.0.13", "site": "vpc-a"},
+  {"host": "m1", "endpoint": "192.168.50.5", "name": "metal-1.example"}
+]
+```
+
+- **`host`:** any unique name. Tunnel names and tunnel addresses derive from it, so don't rename a host while it runs.
+- **`endpoint`:** the address peers tunnel to. Each host finds its own entry by its endpoint, discovered as above or set with `--endpoint`, and takes its name and site from it.
+- **`site`:** hosts on the same VPC share one; it can be any label. Omitted, the host is a site of its own, as bare metal usually is.
+- **`name`:** optional, shown in status.
+
+Differences from the registry:
+
+- **Relays are chosen by file order:** each site's first `--relays` hosts in the file relay. Put the hosts you want relaying first.
+- **No heartbeat:** every listed host counts as live. Babel still reroutes within seconds when one fails. A dead relay isn't replaced automatically, though: its site's hosts keep using the other relay until you edit the file.
+- **Edits take effect without restarts:** each host re-reads the file every `--registry-interval`. A broken file is reported in status and the last good list stays in use. At startup, a missing or invalid file is an error.
+- **Every host needs the same file.** Hosts with different versions can disagree about relays until the rollout finishes.
+- `--site` and `--registry-region` don't apply.
+
 ## Who tunnels to whom
 
-Every host computes the same answer from the same registry view, so nothing coordinates centrally.
+Every host computes the same answer from the same registry view (or peers file), so nothing coordinates centrally.
 
 - **Relays:** each site's `--relays` (default 2) most senior live hosts: earliest first registration, then host ID. A new host never displaces a relay; a relay is replaced only when it stops sending heartbeats.
 - **Relay:** tunnels to every relay of every other site, and to every other host in its own site.

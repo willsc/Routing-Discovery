@@ -44,7 +44,7 @@ enum Command {
         #[command(flatten)]
         args: DxArgs,
     },
-    /// Every host: Babel mesh over its NICs and, with --registry, GRE tunnels to other sites
+    /// Every host: Babel mesh over its NICs and, with --registry or --peers-file, GRE tunnels to other sites
     Mesh {
         operation: MeshOperation,
         #[command(flatten)]
@@ -143,6 +143,7 @@ enum MeshOperation {
 }
 
 #[derive(clap::Args)]
+#[command(group = clap::ArgGroup::new("overlay").args(["registry", "peers_file"]))]
 struct MeshArgs {
     /// Only mesh interfaces matching these globs (replaces the default exclusions)
     #[arg(long = "include", value_name = "GLOB")]
@@ -172,26 +173,29 @@ struct MeshArgs {
     /// Shared host registry (s3://bucket/prefix); enables GRE tunnels between sites
     #[arg(long, value_name = "S3_URL")]
     registry: Option<String>,
+    /// Static JSON list of hosts, instead of --registry; re-read every --registry-interval
+    #[arg(long, value_name = "PATH")]
+    peers_file: Option<PathBuf>,
     /// The registry bucket's region (default from the AWS configuration chain)
-    #[arg(long, requires = "registry")]
+    #[arg(long, requires = "registry", conflicts_with = "peers_file")]
     registry_region: Option<String>,
     /// Where this host runs; auto asks IMDS
-    #[arg(long, value_enum, default_value_t = Platform::Auto, requires = "registry")]
+    #[arg(long, value_enum, default_value_t = Platform::Auto, requires = "overlay")]
     platform: Platform,
-    /// Site this host belongs to (default: its VPC on EC2, the host itself elsewhere)
-    #[arg(long, requires = "registry")]
+    /// Site this host belongs to (default: its VPC on EC2, the host itself elsewhere); with --peers-file, the file sets it
+    #[arg(long, requires = "registry", conflicts_with = "peers_file")]
     site: Option<String>,
     /// Underlay IPv4 address other hosts tunnel to (default: primary IPv4 on EC2, default-path source elsewhere)
-    #[arg(long, requires = "registry")]
+    #[arg(long, requires = "overlay")]
     endpoint: Option<std::net::Ipv4Addr>,
     /// Relays per site
-    #[arg(long, default_value_t = 2, requires = "registry")]
+    #[arg(long, default_value_t = 2, requires = "overlay")]
     relays: usize,
-    /// Seconds between registry syncs (each is an S3 PUT and LIST)
-    #[arg(long, default_value_t = 60.0, requires = "registry")]
+    /// Seconds between registry syncs (each is an S3 PUT and LIST) or peers-file reads
+    #[arg(long, default_value_t = 60.0, requires = "overlay")]
     registry_interval: f64,
     /// Tunnel MTU; the default fits a 1500-byte underlay such as inter-region peering
-    #[arg(long, default_value_t = 1476, requires = "registry")]
+    #[arg(long, default_value_t = 1476, requires = "overlay")]
     tunnel_mtu: u32,
     /// Write FRR configuration (default is dry-run)
     #[arg(long)]
@@ -346,10 +350,17 @@ fn mesh_options(args: MeshArgs) -> Result<mesh::Options> {
     if !(args.interval.is_finite() && args.interval >= 0.2) {
         return config_err("--interval must be at least 0.2 seconds");
     }
-    let overlay = match args.registry {
+    let source = match (args.registry, args.peers_file) {
+        (Some(url), _) => {
+            mesh::overlay::registry::parse_url(&url)?;
+            Some(mesh::overlay::Source::Registry { url, region: args.registry_region })
+        }
+        (None, Some(path)) => Some(mesh::overlay::Source::File(path)),
+        (None, None) => None,
+    };
+    let overlay = match source {
         None => None,
-        Some(registry) => {
-            mesh::overlay::registry::parse_url(&registry)?;
+        Some(source) => {
             if !(1..=8).contains(&args.relays) {
                 return config_err("--relays must be 1-8");
             }
@@ -361,8 +372,7 @@ fn mesh_options(args: MeshArgs) -> Result<mesh::Options> {
                 return config_err("--tunnel-mtu must be 1280-8977");
             }
             Some(mesh::overlay::Options {
-                registry,
-                registry_region: args.registry_region,
+                source,
                 platform: match args.platform {
                     Platform::Auto => mesh::overlay::PlatformChoice::Auto,
                     Platform::Ec2 => mesh::overlay::PlatformChoice::Ec2,

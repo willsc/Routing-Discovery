@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1788" viewBox="0 0 900 1788" role="img" aria-label="route-discovery overlay. 1: each VPC has two relays; ordinary hosts tunnel only to their VPC's relays; relays tunnel to each other over peering; bare metal tunnels to every VPC's relays over Direct Connect. 2: every 60 s the registry sync picks peers; every 2 s the reconcile pass applies pins, tunnels and babeld config. 3: GRE packets use table 4242 so they never loop back into their own tunnel. 4: when a Direct Connect path fails, traffic moves to another relay and crosses VPC peering.">
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1788" viewBox="0 0 900 1788" role="img" aria-label="route-discovery overlay. 1: in each VPC, two of the hosts also relay; the other hosts tunnel only to those two; relaying hosts tunnel to each other over peering; bare-metal hosts tunnel to every VPC's relaying hosts over Direct Connect. 2: every 60 s the registry sync picks peers; every 2 s the reconcile pass applies pins, tunnels and babeld config. 3: GRE packets use table 4242 so they never loop back into their own tunnel. 4: when a Direct Connect path fails, traffic moves to another relay and crosses VPC peering.">
   <style>
   :root, svg { --panel: #ffffff; --fg: #18202a; --muted: #5a6574; --line: #c3ccd7;
     --tunnel: #2453b8; --underlay: #a35a00; --fail: #b92d22;
@@ -73,14 +73,15 @@ text { font-family: var(--body); font-size: 12.5px; fill: var(--fg); }
   <text x="705" y="100" text-anchor="middle" class="t-strong">b3</text><text x="705" y="116" text-anchor="middle" class="t-muted">host</text>
   <!-- relays -->
   <rect class="box-relay" x="70" y="190" width="110" height="44" rx="5"/>
-  <text x="125" y="210" text-anchor="middle" class="t-strong">a1</text><text x="125" y="226" text-anchor="middle" class="t-muted">relay</text>
+  <text x="125" y="210" text-anchor="middle" class="t-strong">a1</text><text x="125" y="226" text-anchor="middle" class="t-muted">host · relaying</text>
   <rect class="box-relay" x="210" y="190" width="110" height="44" rx="5"/>
-  <text x="265" y="210" text-anchor="middle" class="t-strong">a2</text><text x="265" y="226" text-anchor="middle" class="t-muted">relay</text>
+  <text x="265" y="210" text-anchor="middle" class="t-strong">a2</text><text x="265" y="226" text-anchor="middle" class="t-muted">host · relaying</text>
   <rect class="box-relay" x="580" y="190" width="110" height="44" rx="5"/>
-  <text x="635" y="210" text-anchor="middle" class="t-strong">b1</text><text x="635" y="226" text-anchor="middle" class="t-muted">relay</text>
+  <text x="635" y="210" text-anchor="middle" class="t-strong">b1</text><text x="635" y="226" text-anchor="middle" class="t-muted">host · relaying</text>
   <rect class="box-relay" x="720" y="190" width="110" height="44" rx="5"/>
-  <text x="775" y="210" text-anchor="middle" class="t-strong">b2</text><text x="775" y="226" text-anchor="middle" class="t-muted">relay</text>
-  <text x="46" y="258" class="t-muted">hosts tunnel to their 2 relays only</text>
+  <text x="775" y="210" text-anchor="middle" class="t-strong">b2</text><text x="775" y="226" text-anchor="middle" class="t-muted">host · relaying</text>
+  <text x="46" y="258" class="t-muted">a3, a4 tunnel only to a1, a2</text>
+  <text x="856" y="258" text-anchor="end" class="t-muted">blue border: relaying</text>
 
   <!-- relay bundle A <-> B -->
   <line class="tun-bundle" x1="330" y1="212" x2="570" y2="212"/>
@@ -119,7 +120,7 @@ text { font-family: var(--body); font-size: 12.5px; fill: var(--fg); }
   <rect class="box" x="260" y="46" width="200" height="64" rx="5"/>
   <text x="276" y="70" class="t-strong">2 · Read</text><text x="276" y="90" class="t-muted">LIST; GET changed entries</text>
   <rect class="box-relay" x="490" y="46" width="210" height="64" rx="5"/>
-  <text x="506" y="68" class="t-strong">3 · Select</text><text x="506" y="86" class="t-muted">relays: 2 oldest live per site</text><text x="506" y="101" class="t-muted">peers for this host</text>
+  <text x="506" y="68" class="t-strong">3 · Select</text><text x="506" y="86" class="t-muted">which 2 hosts per site relay</text><text x="506" y="101" class="t-muted">peers for this host</text>
   <line class="flow" x1="230" y1="78" x2="256" y2="78" marker-end="url(#f2-head)"/>
   <line class="flow" x1="460" y1="78" x2="486" y2="78" marker-end="url(#f2-head)"/>
   <text x="720" y="70" class="t-muted">If S3 is down, the last</text>
@@ -127,7 +128,7 @@ text { font-family: var(--body); font-size: 12.5px; fill: var(--fg); }
   <text x="720" y="102" class="t-muted">tunnels stay up</text>
 
   <path class="tun" d="M540 110 C 510 150, 330 150, 300 186" marker-end="url(#f2-head-t)"/>
-  <text x="556" y="146" class="t-tunnel">peers, relay role</text>
+  <text x="556" y="146" class="t-tunnel">peers; relaying or not</text>
 
   <text x="30" y="176" class="t-lane">every 2 s · reconcile pass</text>
   <rect class="box" x="30" y="188" width="150" height="64" rx="5"/>
@@ -146,7 +147,7 @@ text { font-family: var(--body); font-size: 12.5px; fill: var(--fg); }
   <line class="flow" x1="690" y1="220" x2="706" y2="220" marker-end="url(#f2-head)"/>
 </g>
 <line class="divider" x1="30" y1="962" x2="870" y2="962"/>
-<text x="30" y="992" class="t-heading"><tspan class="t-num">3</tspan>  One packet through relay a1, and why table 4242 exists</text>
+<text x="30" y="992" class="t-heading"><tspan class="t-num">3</tspan>  One packet leaving host a1, and why table 4242 exists</text>
 <g transform="translate(0 1006)">
   <defs>
     <marker id="f3-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="head-fg"/></marker>
@@ -208,9 +209,9 @@ text { font-family: var(--body); font-size: 12.5px; fill: var(--fg); }
     <rect class="box" x="30" y="56" width="120" height="40" rx="5"/>
     <text x="90" y="81" text-anchor="middle" class="t-strong">a3 · host</text>
     <rect class="box-relay" x="30" y="164" width="120" height="44" rx="5"/>
-    <text x="90" y="191" text-anchor="middle" class="t-strong">a1 · relay</text>
+    <text x="90" y="191" text-anchor="middle" class="t-strong">a1 · host</text>
     <rect class="box-relay" x="250" y="164" width="120" height="44" rx="5"/>
-    <text x="310" y="191" text-anchor="middle" class="t-strong">b1 · relay</text>
+    <text x="310" y="191" text-anchor="middle" class="t-strong">b1 · host</text>
     <rect class="box-relay" x="140" y="285" width="120" height="40" rx="5"/>
     <text x="200" y="310" text-anchor="middle" class="t-strong">m1</text>
     <text x="100" y="134" class="t-muted">VPC A fabric</text>
@@ -232,9 +233,9 @@ text { font-family: var(--body); font-size: 12.5px; fill: var(--fg); }
     <rect class="box" x="30" y="56" width="120" height="40" rx="5"/>
     <text x="90" y="81" text-anchor="middle" class="t-strong">a3 · host</text>
     <rect class="box-relay" x="30" y="164" width="120" height="44" rx="5"/>
-    <text x="90" y="191" text-anchor="middle" class="t-strong">a1 · relay</text>
+    <text x="90" y="191" text-anchor="middle" class="t-strong">a1 · host</text>
     <rect class="box-relay" x="250" y="164" width="120" height="44" rx="5"/>
-    <text x="310" y="191" text-anchor="middle" class="t-strong">b1 · relay</text>
+    <text x="310" y="191" text-anchor="middle" class="t-strong">b1 · host</text>
     <rect class="box-relay" x="140" y="285" width="120" height="40" rx="5"/>
     <text x="200" y="310" text-anchor="middle" class="t-strong">m1</text>
     <text x="100" y="134" class="t-muted">VPC A fabric</text>

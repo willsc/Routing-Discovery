@@ -12,7 +12,7 @@ use route_discovery::mesh::inventory::{parse, Filter};
 use route_discovery::mesh::overlay::registry::{key_of, parse_url, Entry, Object, Platform, Registry, Store};
 use route_discovery::mesh::overlay::select::select;
 use route_discovery::mesh::overlay::underlay::{self, Pin};
-use route_discovery::mesh::overlay::{self, metal_identity, tunnel, Overlay, PlatformChoice};
+use route_discovery::mesh::overlay::{self, metal_identity, peers, tunnel, Overlay, PlatformChoice};
 use route_discovery::mesh::{Mesh, Options};
 
 fn entry(host: &str, site: &str, endpoint: &str, since: i64) -> Entry {
@@ -320,8 +320,7 @@ async fn registry_sync_publishes_ages_by_s3_time_and_fetches_only_changes() {
 
 fn overlay_options() -> overlay::Options {
     overlay::Options {
-        registry: "s3://bucket/mesh".into(),
-        registry_region: None,
+        source: overlay::Source::Registry { url: "s3://bucket/mesh".into(), region: None },
         platform: PlatformChoice::Ec2,
         site: None,
         endpoint: None,
@@ -334,6 +333,8 @@ fn overlay_options() -> overlay::Options {
 /// A fake EC2 host: canned `ip` and vtysh reads, every other command recorded.
 struct Host {
     calls: Mutex<Vec<String>>,
+    /// A fresh host: table 4242 doesn't exist until its first route.
+    fresh: bool,
 }
 
 #[async_trait]
@@ -341,6 +342,9 @@ impl Runner for Host {
     async fn run(&self, args: &[String], _timeout: f64) -> Result<String> {
         let line = args.join(" ");
         self.calls.lock().unwrap().push(line.clone());
+        if self.fresh && line == "ip -json route show table 4242" {
+            return Err(Error::Backend("ip exited 2: Error: ipv4: FIB table does not exist.\nDump terminated".into()));
+        }
         Ok(match line.as_str() {
             "ip -json addr show" => tunnel_host().to_string(),
             "ip -d -json addr show" => "[]".into(),
@@ -363,9 +367,9 @@ async fn a_vpc_member_tunnels_to_its_relays_and_meshes_only_over_them() {
         store.add(&e, 9_990);
     }
     let own = entry("i-a3", "vpc-a", "10.1.0.13", 300);
-    let overlay = Overlay::new(overlay_options(), own, vec!["10.1.0.0/16".parse().unwrap()], store.clone()).await.unwrap();
+    let overlay = Overlay::new(overlay_options(), own, vec!["10.1.0.0/16".parse().unwrap()], Some(store.clone())).await.unwrap();
     assert_eq!(overlay.own.since, 300, "seniority comes from the existing registry entry");
-    let host = Arc::new(Host { calls: Mutex::new(vec![]) });
+    let host = Arc::new(Host { calls: Mutex::new(vec![]), fresh: false });
     let options = Options {
         filter: Filter::default(),
         policy: Policy::default(),
@@ -397,4 +401,70 @@ async fn a_vpc_member_tunnels_to_its_relays_and_meshes_only_over_them() {
     assert!(configure.contains("RDM-OUT-V4-A seq 5 deny any"));
     assert!(configure.contains("RDM-IN-V4-A seq 5 deny 10.1.0.0/16 le 32"));
     assert_eq!(*store.puts.lock().unwrap(), 1);
+}
+
+const PEERS: &str = r#"[
+  {"host": "a1", "endpoint": "10.1.0.11", "site": "vpc-a"},
+  {"host": "a2", "endpoint": "10.1.0.12", "site": "vpc-a"},
+  {"host": "a3", "endpoint": "10.1.0.13", "site": "vpc-a", "name": "app-3"},
+  {"host": "b1", "endpoint": "10.2.0.11", "site": "vpc-b"},
+  {"host": "m1", "endpoint": "192.168.50.5"}
+]"#;
+
+#[test]
+fn peers_file_order_is_seniority_and_sites_default_to_the_host() {
+    let entries = peers::parse(PEERS).unwrap();
+    assert_eq!(hosts(&entries), ["a1", "a2", "a3", "b1", "m1"]);
+    assert_eq!(entries.iter().map(|e| e.since).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+    assert_eq!(entries[4].site, "m1");
+    assert_eq!((entries[0].name.as_str(), entries[2].name.as_str()), ("a1", "app-3"));
+
+    let twice = r#"[{"host": "a1", "endpoint": "10.1.0.11"}, {"host": "a1", "endpoint": "10.1.0.12"}]"#;
+    assert!(peers::parse(twice).unwrap_err().to_string().contains("listed twice"));
+    let shared = r#"[{"host": "a1", "endpoint": "10.1.0.11"}, {"host": "a2", "endpoint": "10.1.0.11"}]"#;
+    assert!(peers::parse(shared).unwrap_err().to_string().contains("10.1.0.11 is listed twice"));
+    // A typo is an error, not a silently missing field.
+    assert!(peers::parse(r#"[{"host": "a1", "endpiont": "10.1.0.11"}]"#).is_err());
+}
+
+#[test]
+fn a_host_finds_itself_in_the_peers_file_by_endpoint() {
+    let discovered = entry("i-0abc", "vpc-0123", "10.1.0.13", 1_700_000_000);
+    let (own, entries) = peers::resolve(&discovered, peers::parse(PEERS).unwrap()).unwrap();
+    assert_eq!((own.host.as_str(), own.site.as_str(), own.since), ("a3", "vpc-a", 2));
+    assert_eq!(own.platform, Platform::Ec2, "the platform is discovered, not listed");
+    assert!(entries.iter().all(|(_, age)| *age == 0));
+    let selection = select(&own, &entries, 300, 2);
+    assert_eq!(selection.relays["vpc-a"], ["a1", "a2"]);
+    assert_eq!(hosts(&selection.peers), ["a1", "a2"]);
+
+    let stranger = entry("i-0def", "vpc-0123", "10.1.0.99", 0);
+    assert!(peers::resolve(&stranger, peers::parse(PEERS).unwrap()).unwrap_err().to_string().contains("10.1.0.99 is not listed"));
+}
+
+#[tokio::test]
+async fn a_peers_file_host_tunnels_without_a_registry() {
+    let path = std::env::temp_dir().join(format!("rd-peers-{}.json", std::process::id()));
+    std::fs::write(&path, PEERS).unwrap();
+    let mut options = overlay_options();
+    options.source = overlay::Source::File(path.clone());
+    let discovered = entry("i-0abc", "vpc-0123", "10.1.0.13", 0);
+    let overlay = Overlay::new(options.clone(), discovered, vec!["10.1.0.0/16".parse().unwrap()], None).await.unwrap();
+    let host = Host { calls: Mutex::new(vec![]), fresh: true };
+    let (shape, errors) = overlay.reconcile(&host, true).await.unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(!shape.relay);
+    let calls = host.calls.lock().unwrap().clone();
+    let created: Vec<&String> = calls.iter().filter(|c| c.starts_with("ip link add")).collect();
+    assert_eq!(created.len(), 2, "{created:?}");
+    for relay in ["a1", "a2"] {
+        assert!(created.iter().any(|c| c.starts_with(&format!("ip link add {} ", tunnel::tunnel_name(relay)))));
+    }
+    // Tunnel addresses come from the listed ID, which every peer agrees on.
+    let ll = format!("ip addr add {}/64", tunnel::link_local("a3"));
+    assert!(calls.iter().any(|c| c.starts_with(&ll)), "{calls:#?}");
+    assert_eq!(overlay.snapshot()["host"]["host"], "a3");
+    // On a fresh host table 4242 doesn't exist yet; the pass still pins endpoints, which creates it.
+    assert!(calls.iter().any(|c| c == "ip route replace 10.1.0.11/32 dev ens5 table 4242 proto 249"), "{calls:#?}");
 }
