@@ -44,6 +44,8 @@ Every host computes the same answer from the same registry view, so nothing coor
 
 With 500 hosts in 20 VPCs, an ordinary host has 2 tunnels and a relay about 60.
 
+Each tunnel is a GRE interface `rdm<hash of the peer's host ID>` with MTU `--tunnel-mtu`, the MULTICAST flag, an IPv6 link-local address for Babel's hellos, and a point-to-point IPv4 pair in 169.254/16 (for example `169.254.12.7 peer 169.254.201.33`). FRR's babeld announces IPv4 routes with an IPv4 next hop, which is what the pair provides. Each host's addresses are derived from its host ID, and avoid 169.254.169.x and 169.254.170.x, where AWS runs IMDS, DNS and the ECS endpoints. They are link-local, so they are never published.
+
 ## What gets routed
 
 | Host | Babel runs on | Advertises | Never learns |
@@ -88,7 +90,7 @@ On every host:
 In AWS:
 
 - **Security groups and network ACLs:** allow IP protocol 47 (GRE) between every mesh host's endpoint, and ICMP "fragmentation needed". Allow GRE only from mesh endpoints (see Security).
-- **Source/destination check:** turn it off on every mesh instance, for example in the launch template. Relays deliver decapsulated traffic onto their VPC with the original source address.
+- **Source/destination check:** turn it off on every mesh instance (`aws ec2 modify-instance-attribute --no-source-dest-check`, from your provisioning tooling). Relays deliver decapsulated traffic onto their VPC with the original source address.
 - **IAM:** grant [`deploy/mesh-aws-policy.json`](../deploy/mesh-aws-policy.json), with the bucket and prefix filled in. Bare-metal hosts use IAM Roles Anywhere or another credential process, as for the dx role.
 - **S3 bucket:** versioning off (or expire noncurrent versions quickly), plus a lifecycle rule that expires `prefix/hosts/` objects after 1 day. Live hosts rewrite their entry every interval, so only departed hosts expire.
 

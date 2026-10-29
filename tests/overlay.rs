@@ -76,16 +76,24 @@ fn tunnel_names_and_link_locals_are_stable() {
     let ll = tunnel::link_local("i-a1");
     assert!(ll.is_unicast_link_local());
     assert_ne!(ll, tunnel::link_local("i-a2"));
+    // IPv4 next hops inside tunnels are link-local and avoid AWS's 169.254.169.x and 169.254.170.x services.
+    for i in 0..5000 {
+        let inner = tunnel::inner_v4(&format!("i-{i:017x}"));
+        assert!(
+            inner.is_link_local() && !matches!(inner.octets()[2], 0 | 169 | 170 | 255) && !matches!(inner.octets()[3], 0 | 255)
+        );
+    }
 }
 
 #[test]
 fn tunnels_are_created_then_converge() {
     let peers = vec![entry("i-b1", "vpc-b", "10.2.0.11", 100)];
-    let local: Ipv4Addr = "10.1.0.11".parse().unwrap();
-    let (tunnels, skipped) = tunnel::desired(local, &peers);
+    let own = entry("i-a1", "vpc-a", "10.1.0.11", 100);
+    let (tunnels, skipped) = tunnel::desired(&own, &peers);
     assert!(skipped.is_empty());
     let name = tunnel::tunnel_name("i-b1");
     let ll = tunnel::link_local("i-a1");
+    let (inner, peer) = (tunnel::inner_v4("i-a1"), tunnel::inner_v4("i-b1"));
     let stale = json!([{"ifname": "rdm00000000", "flags": ["UP"], "linkinfo": {"info_kind": "gre"}, "addr_info": []}]);
     let commands: Vec<String> =
         tunnel::plan(&tunnels, &tunnel::parse(&stale).unwrap(), ll, 1476).iter().map(|c| c.join(" ")).collect();
@@ -97,15 +105,23 @@ fn tunnels_are_created_then_converge() {
             format!("ip link set {name} mtu 1476"),
             format!("ip link set {name} multicast on"),
             format!("ip addr add {ll}/64 dev {name}"),
+            format!("ip addr add {inner}/32 peer {peer}/32 dev {name}"),
             format!("ip link set {name} up"),
         ]
     );
     let converged = json!([{
         "ifname": name, "mtu": 1476, "flags": ["POINTOPOINT", "MULTICAST", "NOARP", "UP"],
         "linkinfo": {"info_kind": "gre", "info_data": {"local": "10.1.0.11", "remote": "10.2.0.11"}},
-        "addr_info": [{"local": ll.to_string(), "prefixlen": 64}]
+        "addr_info": [{"local": ll.to_string(), "prefixlen": 64},
+                      {"local": inner.to_string(), "address": peer.to_string(), "prefixlen": 32}]
     }]);
     assert!(tunnel::plan(&tunnels, &tunnel::parse(&converged).unwrap(), ll, 1476).is_empty());
+    // A stray IPv4 address on an owned tunnel is removed with its real prefix length.
+    let mut stray = converged.clone();
+    stray[0]["addr_info"].as_array_mut().unwrap().push(json!({"local": "169.254.99.1", "prefixlen": 30}));
+    let commands: Vec<String> =
+        tunnel::plan(&tunnels, &tunnel::parse(&stray).unwrap(), ll, 1476).iter().map(|c| c.join(" ")).collect();
+    assert_eq!(commands, [format!("ip addr del 169.254.99.1/30 dev {name}")]);
 }
 
 /// An EC2 host's main table once Babel has learned the remote VPC over a tunnel.

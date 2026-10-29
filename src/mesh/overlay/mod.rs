@@ -138,7 +138,7 @@ impl Overlay {
     pub async fn reconcile(&self, runner: &dyn Runner, apply: bool) -> Result<(Shape, Vec<String>)> {
         let mut errors: Vec<String> = self.sync(apply).await.into_iter().collect();
         let selection = self.status.lock().unwrap().selection.clone();
-        let (tunnels, skipped) = tunnel::desired(self.own.endpoint, &selection.peers);
+        let (tunnels, skipped) = tunnel::desired(&self.own, &selection.peers);
         let links = tunnel::parse(&json_of(&runner.run(&argv(["ip", "-d", "-json", "addr", "show"]), 3.0).await?, "ip addr")?)?;
         let main = underlay::parse_routes(&json_of(
             &runner.run(&argv(["ip", "-json", "route", "show", "table", "main"]), 3.0).await?,

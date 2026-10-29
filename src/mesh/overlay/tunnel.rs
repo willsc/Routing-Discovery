@@ -1,7 +1,9 @@
 //! GRE tunnels to selected peers. Only interfaces named `rdm*` are owned.
 //!
-//! Each tunnel gets the MULTICAST flag and a fixed IPv6 link-local address, which is all Babel
-//! needs to form an adjacency over it; the mesh inventory then picks it up like any other link.
+//! Each tunnel gets the MULTICAST flag, a fixed IPv6 link-local address for Babel's hellos, and a
+//! point-to-point IPv4 link-local pair: FRR's babeld announces IPv4 routes with an IPv4 next hop,
+//! so without one, IPv4 routes over the tunnel would never install. The mesh inventory then picks
+//! the tunnel up like any other link; link-local addresses are never published.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -23,6 +25,8 @@ pub struct Tunnel {
     pub peer: String,
     pub local: Ipv4Addr,
     pub remote: Ipv4Addr,
+    /// IPv4 next-hop pair inside the tunnel: (this host, the peer).
+    pub inner: (Ipv4Addr, Ipv4Addr),
 }
 
 /// `rdm` plus 8 hex digits of the peer's host ID: 11 bytes, within IFNAMSIZ.
@@ -36,8 +40,18 @@ pub fn link_local(host: &str) -> Ipv6Addr {
     Ipv6Addr::new(0xfe80, 0, 0, 0, (a >> 16) as u16, a as u16, (b >> 16) as u16, b as u16)
 }
 
-/// Tunnels for `peers`; a peer whose name collides with an earlier one is reported and skipped.
-pub fn desired(local: Ipv4Addr, peers: &[Entry]) -> (Vec<Tunnel>, Vec<String>) {
+/// A host's IPv4 address inside every tunnel: 169.254.x.y from its host ID. Second octets 169 and
+/// 170 are skipped, so it never shadows IMDS, the Amazon DNS resolver or the ECS metadata endpoint.
+pub fn inner_v4(host: &str) -> Ipv4Addr {
+    let hash = fnv1a(format!("{host}/inner-v4").as_bytes());
+    let thirds: Vec<u8> = (1..=254).filter(|o| !matches!(o, 169 | 170)).collect();
+    let third = thirds[(hash >> 8) as usize % thirds.len()];
+    Ipv4Addr::new(169, 254, third, 1 + (hash % 254) as u8)
+}
+
+/// Tunnels from `own` to `peers`; a peer whose name or inner address collides is reported and skipped.
+pub fn desired(own: &Entry, peers: &[Entry]) -> (Vec<Tunnel>, Vec<String>) {
+    let inner = inner_v4(&own.host);
     let mut tunnels: Vec<Tunnel> = vec![];
     let mut skipped = vec![];
     for peer in peers {
@@ -46,7 +60,18 @@ pub fn desired(local: Ipv4Addr, peers: &[Entry]) -> (Vec<Tunnel>, Vec<String>) {
             skipped.push(format!("{}: tunnel name {name} already used for {}", peer.host, first.peer));
             continue;
         }
-        tunnels.push(Tunnel { name, peer: peer.host.clone(), local, remote: peer.endpoint });
+        let peer_inner = inner_v4(&peer.host);
+        if peer_inner == inner {
+            skipped.push(format!("{}: inner address {inner} collides with this host's", peer.host));
+            continue;
+        }
+        tunnels.push(Tunnel {
+            name,
+            peer: peer.host.clone(),
+            local: own.endpoint,
+            remote: peer.endpoint,
+            inner: (inner, peer_inner),
+        });
     }
     (tunnels, skipped)
 }
@@ -60,6 +85,8 @@ pub struct Existing {
     pub up: bool,
     pub multicast: bool,
     pub addresses: BTreeSet<IpNet>,
+    /// IPv4 addresses: (address, prefix length, point-to-point peer).
+    pub v4: BTreeSet<(Ipv4Addr, u8, Option<Ipv4Addr>)>,
 }
 
 /// Owned tunnels from `ip -d -json addr show`.
@@ -77,6 +104,15 @@ pub fn parse(data: &Value) -> Result<BTreeMap<String, Existing>> {
             .flatten()
             .filter_map(|a| IpNet::new(a["local"].as_str()?.parse().ok()?, a["prefixlen"].as_u64()? as u8).ok())
             .collect();
+        let v4 = link["addr_info"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| {
+                let local = a["local"].as_str()?.parse().ok()?;
+                Some((local, a["prefixlen"].as_u64()? as u8, a["address"].as_str().and_then(|p| p.parse().ok())))
+            })
+            .collect();
         tunnels.insert(
             name.to_string(),
             Existing {
@@ -87,6 +123,7 @@ pub fn parse(data: &Value) -> Result<BTreeMap<String, Existing>> {
                 up: flags.contains("UP"),
                 multicast: flags.contains("MULTICAST"),
                 addresses,
+                v4,
             },
         );
     }
@@ -134,6 +171,19 @@ pub fn plan(desired: &[Tunnel], existing: &BTreeMap<String, Existing>, link_loca
         }
         if !current.is_some_and(|c| c.addresses.contains(&address)) {
             commands.push(argv(["ip", "addr", "add", &address.to_string(), "dev", &tunnel.name]));
+        }
+        let (inner, peer) = (format!("{}/32", tunnel.inner.0), format!("{}/32", tunnel.inner.1));
+        let pair = (tunnel.inner.0, 32, Some(tunnel.inner.1));
+        for (local, length, other) in current.map(|c| c.v4.clone()).unwrap_or_default().into_iter().filter(|a| *a != pair) {
+            let mut del = argv(["ip", "addr", "del", &format!("{local}/{length}")]);
+            if let Some(other) = other {
+                del.extend(argv(["peer".to_string(), format!("{other}/{length}")]));
+            }
+            del.extend(argv(["dev", &tunnel.name]));
+            commands.push(del);
+        }
+        if !current.is_some_and(|c| c.v4.contains(&pair)) {
+            commands.push(argv(["ip", "addr", "add", &inner, "peer", &peer, "dev", &tunnel.name]));
         }
         if !current.is_some_and(|c| c.up) {
             commands.push(argv(["ip", "link", "set", &tunnel.name, "up"]));
