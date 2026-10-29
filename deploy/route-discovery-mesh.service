@@ -1,5 +1,5 @@
 [Unit]
-Description=Zero-configuration Babel mesh over FRR
+Description=Zero-configuration Babel mesh over FRR, with an optional GRE overlay
 Wants=network-online.target frr.service
 After=network-online.target frr.service
 StartLimitIntervalSec=60
@@ -12,14 +12,18 @@ WatchdogSec=60
 User=route-discovery
 Group=route-discovery
 SupplementaryGroups=frrvty
+# GRE tunnels, endpoint pins and originated routes for --registry.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 StateDirectory=route-discovery-mesh
 StateDirectoryMode=0700
-ExecStart=/usr/local/bin/route-discovery mesh run --apply
+# MESH_ARGS (for example --registry s3://bucket/prefix) and AWS credentials for the registry.
+EnvironmentFile=-/etc/default/route-discovery-mesh
+ExecStart=/usr/local/bin/route-discovery mesh run --apply $MESH_ARGS
 Restart=on-failure
 RestartSec=3
 UMask=0077
 NoNewPrivileges=true
-CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true

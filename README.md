@@ -1,28 +1,28 @@
 # route-discovery
 
-Zero-configuration routing for AWS and on-prem networks. There are no routing configuration files. Each node discovers its interfaces, addresses and peers from the host and from AWS, then drives [FRR](https://frrouting.org), which speaks BGP, BFD and Babel. Where the network belongs to AWS (VPC route tables, Transit Gateway, VGWs, Direct Connect gateways), AWS's managed routers carry the routes. Nothing builds an overlay between instances.
+Zero-configuration routing for hosts in AWS and outside it. There are no routing configuration files and no edge router. Every host runs the daemon: it discovers its interfaces, addresses and peers from the host, from AWS and from a shared S3 registry, then drives [FRR](https://frrouting.org), which speaks Babel, BGP and BFD. Hosts build GRE tunnels to each other across VPC peering, Direct Connect and leased lines and run Babel over them, so when a path fails, routing on the hosts reconfigures itself.
 
 ```mermaid
 flowchart LR
-    subgraph AWS
-        EC2[EC2 instance<br/><b>bgp</b> role] -- BGP + BFD --> RS[VPC Route Server] --> RT[VPC route tables]
-        EC2 -- GRE + BGP --> TGW[Transit Gateway<br/>Connect]
-        TGW --- VPCs[Other VPCs] & VPN[Site-to-Site VPN]
-        TGW --- DXGW[Direct Connect gateway]
-        VGW[Virtual private gateway] --- RT
+    subgraph VA["VPC A"]
+        A1["relays<br/><b>mesh</b>"] --- AH["hosts<br/><b>mesh</b>"]
     end
-    subgraph On-prem
-        DX[Edge router<br/><b>dx</b> role] -- private VIF --> VGW
-        DX -- transit VIF --> DXGW
-        DX --- MESH[LAN routers<br/><b>mesh</b> role, Babel]
+    subgraph VB["VPC B"]
+        B1["relays<br/><b>mesh</b>"] --- BH["hosts<br/><b>mesh</b>"]
     end
+    M["bare-metal hosts<br/><b>mesh</b>"]
+    A1 == "GRE over VPC peering" === B1
+    M == "GRE over Direct Connect<br/>(carrier routers, leased lines)" === A1 & B1
+    S3[(S3 registry)] -.- VA & VB & M
 ```
 
 | Role | Runs on | Discovers from | Speaks | Announces |
 | --- | --- | --- | --- | --- |
+| [`mesh`](docs/mesh.md) | Every host, EC2 or bare metal | Local NICs (`ip -json addr`); with `--registry`, IMDS and the [S3 registry](docs/overlay.md) | Babel, over GRE tunnels between sites | EC2 relays: their VPC's CIDRs. Bare metal: connected subnets. Container and bridge subnets are withheld |
 | [`bgp`](docs/bgp.md) | EC2 instances | IMDSv2; EC2 Route Server and TGW Connect peers that name its ENIs | BGP to VPC Route Server (with BFD) and TGW Connect (over GRE) | Service addresses outside the VPC CIDRs, such as VIPs on `lo` or `dummy` |
-| [`dx`](docs/dx.md) | The on-prem router terminating Direct Connect | Direct Connect API: its private/transit VIFs, VLANs, peer addresses, ASNs, MD5 keys | BGP (with BFD) on every VIF | Its connected on-prem subnets and optional aggregates, capped at AWS's 100-prefix VIF limit |
-| [`mesh`](docs/mesh.md) | On-prem or LAN hosts and routers | Local NICs (`ip -json addr`) | Babel between neighbours on each link | Its connected subnets; container and bridge subnets are withheld |
+| [`dx`](docs/dx.md) | A host outside AWS that terminates Direct Connect VIFs itself | Direct Connect API: its private/transit VIFs, VLANs, peer addresses, ASNs, MD5 keys | BGP (with BFD) on every VIF | Its connected subnets and optional aggregates, capped at AWS's 100-prefix VIF limit |
+
+Where carrier routers terminate Direct Connect, no host runs `dx`: the carrier carries the GRE tunnels' packets between bare-metal hosts and VPCs.
 
 PrivateLink isn't a routing transport. Interface endpoints sit inside their VPC's CIDR and are reachable wherever that CIDR is routed. VPCs with overlapping CIDRs can't be joined by routing.
 
@@ -31,7 +31,7 @@ PrivateLink isn't a routing transport. Interface endpoints sit inside their VPC'
 Every role runs the same loop:
 
 1. **Discover:** read the host and AWS. This is read-only, every few seconds.
-2. **Plan:** derive the FRR configuration and any interfaces the role needs: GRE tunnels for TGW Connect, VLAN links for DX VIFs.
+2. **Plan:** derive the FRR configuration and any interfaces the role needs: GRE tunnels between mesh hosts or to TGW Connect, VLAN links for DX VIFs.
 3. **Apply,** only with `--apply`: create the interfaces, then reload FRR. Without `--apply`, every role is a dry run that logs what it would change.
 4. **Verify and report:** BGP or Babel session state, announced and withheld prefixes, anything ignored and why. Results are served at `/status`, `/healthz`, `/readyz` and `/metrics`.
 
@@ -42,10 +42,10 @@ Safety rules shared by all roles:
   - `bgp` withholds announcements while an ENI's source/destination check would drop the traffic.
   - `dx` announces nothing, rather than exceed AWS's prefix limit and idle the VIF.
   - `mesh` explicitly denies subnets on excluded interfaces.
-- **Never learn your own space back.** `bgp` rejects its VPC's CIDRs, and `dx` rejects its announced on-prem prefixes. A default route is only accepted where the role's guide says so.
+- **Never learn your own space back.** `bgp` and EC2 mesh hosts reject their VPC's CIDRs, and `dx` rejects its announced prefixes. A default route is only accepted where the role's guide says so.
 - **Narrow ownership.**
   - `bgp` and `dx` each own FRR's bgpd, so run one of them per FRR instance. `mesh` owns babeld's networks and its `RDM-*` filters.
-  - Interfaces are only touched if they're named `rdgre*` (`bgp`) or `rddx*` (`dx`).
+  - Interfaces are only touched if they're named `rdm*` (`mesh`), `rdgre*` (`bgp`) or `rddx*` (`dx`).
   - AWS resources are only created with `bgp --register`, and only deleted if they carry the owner tag.
 
 ## Quick start
@@ -57,19 +57,23 @@ cargo build --release            # or --no-default-features for a mesh-only bina
 route-discovery mesh inventory
 route-discovery mesh render-frr
 
+# Join the overlay: tunnels and babeld changes it would make (reads the registry, writes nothing)
+route-discovery mesh plan --registry s3://my-mesh-bucket/prod
+sudo route-discovery mesh run --apply --registry s3://my-mesh-bucket/prod
+
 # On an EC2 instance: what does AWS say this instance peers with?
 route-discovery bgp discover
 route-discovery bgp run --register --sweep           # dry run: logs peers, tunnels and reloads it would make
 sudo route-discovery bgp run --apply --register --sweep
 
-# On the on-prem Direct Connect router
+# On a host that terminates Direct Connect VIFs itself
 route-discovery dx discover --region eu-west-2
 sudo route-discovery dx run --apply --region eu-west-2 --parent eth1=dxcon-abc123
 
 route-discovery status --url http://127.0.0.1:9811/status   # bgp; dx is 9812, mesh is 9810
 ```
 
-The only inputs are optional flags for things a host can't discover: which physical port a Direct Connect connection uses (`--parent`), which ASN to register with (`--register-asn`), and interface include/exclude globs. Each role's guide lists them.
+The only inputs are optional flags for things a host can't discover: the registry bucket (`--registry`), which physical port a Direct Connect connection uses (`--parent`), which ASN to register with (`--register-asn`), and interface include/exclude globs. Each role's guide lists them.
 
 ## Install as a service
 
@@ -79,7 +83,9 @@ The only inputs are optional flags for things a host can't discover: which physi
 2. Create a `route-discovery` system user in the `frrvty` and `frr` groups, and install the binary at `/usr/local/bin/route-discovery`.
 3. Grant AWS permissions:
    - `bgp`: [`bgp-aws-policy.json`](deploy/bgp-aws-policy.json), plus [`bgp-aws-register-policy.json`](deploy/bgp-aws-register-policy.json) for `--register` or `--sweep`.
-   - `dx`: [`dx-aws-policy.json`](deploy/dx-aws-policy.json). On-prem routers use IAM Roles Anywhere or another credential process.
+   - `mesh` with `--registry`: [`mesh-aws-policy.json`](deploy/mesh-aws-policy.json).
+   - `dx`: [`dx-aws-policy.json`](deploy/dx-aws-policy.json).
+   - Hosts outside AWS use IAM Roles Anywhere or another credential process.
 4. Install the matching unit from [`deploy/`](deploy): `route-discovery-bgp.service`, `route-discovery-dx.service` or `route-discovery-mesh.service`.
 
 The units are `Type=notify` with a watchdog, and run with only `CAP_NET_ADMIN` where tunnels or VLANs are needed. Each role takes a lock on its state directory, so two controllers never manage the same plane.
@@ -87,16 +93,17 @@ The units are `Type=notify` with a watchdog, and run with only `CAP_NET_ADMIN` w
 ## Development
 
 ```bash
-make test     # unit and integration tests with fake IMDS, EC2, Direct Connect and FRR
+make test     # unit and integration tests with fake IMDS, EC2, Direct Connect, S3 and FRR
 make lint     # rustfmt and clippy, with and without the aws feature
 make render   # mesh inventory and babeld fragment for this machine
 ```
 
-Tests use fakes for IMDS, EC2, Direct Connect, `ip` and FRR. Nothing has yet been validated against a live AWS account or FRR instance. Staging checks for each role are listed in its guide:
+Tests use fakes for IMDS, EC2, Direct Connect, S3, `ip` and FRR. Nothing has yet been validated against a live AWS account or FRR instance. Staging checks for each role are listed in its guide:
 - AWS condition keys in the IAM policies;
 - TGW Connect eBGP multihop;
 - `frr-reload.py` behaviour on your FRR version;
-- the running-config format that `mesh` parses.
+- the running-config format that `mesh` parses;
+- Babel over GRE, the `ipproto gre` rule and kernel-route redistribution on your kernel and FRR version (see [GRE overlay](docs/overlay.md)).
 
 ## Layout
 
@@ -105,6 +112,7 @@ Tests use fakes for IMDS, EC2, Direct Connect, `ip` and FRR. Nothing has yet bee
 | `src/bgp/` | IMDS discovery, Route Server and TGW Connect peerings, GRE tunnels, self-registration and sweep, bgpd rendering |
 | `src/dx/` | Direct Connect VIF discovery, VLAN links, bgpd rendering |
 | `src/mesh/` | NIC inventory, babeld planning and verification |
+| `src/mesh/overlay/` | S3 registry, relay selection, GRE tunnels, underlay pinning |
 | `src/http.rs`, `src/supervision.rs`, `src/state.rs`, `src/commands.rs` | Status endpoint, systemd notify and signals, state lock, bounded subprocesses |
 | `deploy/` | systemd units and IAM policies |
 | `docs/` | Per-role guides |

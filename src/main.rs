@@ -9,7 +9,7 @@ use route_discovery::bgp;
 use route_discovery::commands::SystemRunner;
 use route_discovery::dx;
 use route_discovery::error::{config_err, Error, Result};
-use route_discovery::mesh::{self, frr::Policy, frr::Vtysh, inventory::collect, inventory::Filter, inventory::DEFAULT_EXCLUDE};
+use route_discovery::mesh::{self, frr::Policy, frr::Vtysh, inventory::Filter, inventory::DEFAULT_EXCLUDE};
 use route_discovery::state::StateStore;
 
 #[derive(Parser)]
@@ -38,13 +38,13 @@ enum Command {
         #[command(flatten)]
         args: BgpArgs,
     },
-    /// On-prem router: BGP over Direct Connect private and transit VIFs
+    /// Host outside AWS terminating Direct Connect VIFs: BGP over private and transit VIFs
     Dx {
         operation: DxOperation,
         #[command(flatten)]
         args: DxArgs,
     },
-    /// On-prem or LAN segments: Babel mesh over every eligible NIC
+    /// Every host: Babel mesh over its NICs and, with --registry, GRE tunnels to other sites
     Mesh {
         operation: MeshOperation,
         #[command(flatten)]
@@ -116,6 +116,13 @@ struct BgpArgs {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum Platform {
+    Auto,
+    Ec2,
+    Metal,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum Liveness {
     Bfd,
     BgpKeepalive,
@@ -162,6 +169,30 @@ struct MeshArgs {
     port: u16,
     #[arg(long, default_value = "/var/lib/route-discovery-mesh")]
     state_dir: PathBuf,
+    /// Shared host registry (s3://bucket/prefix); enables GRE tunnels between sites
+    #[arg(long, value_name = "S3_URL")]
+    registry: Option<String>,
+    /// The registry bucket's region (default from the AWS configuration chain)
+    #[arg(long, requires = "registry")]
+    registry_region: Option<String>,
+    /// Where this host runs; auto asks IMDS
+    #[arg(long, value_enum, default_value_t = Platform::Auto, requires = "registry")]
+    platform: Platform,
+    /// Site this host belongs to (default: its VPC on EC2, the host itself elsewhere)
+    #[arg(long, requires = "registry")]
+    site: Option<String>,
+    /// Underlay IPv4 address other hosts tunnel to (default: primary IPv4 on EC2, default-path source elsewhere)
+    #[arg(long, requires = "registry")]
+    endpoint: Option<std::net::Ipv4Addr>,
+    /// Relays per site
+    #[arg(long, default_value_t = 2, requires = "registry")]
+    relays: usize,
+    /// Seconds between registry syncs (each is an S3 PUT and LIST)
+    #[arg(long, default_value_t = 60.0, requires = "registry")]
+    registry_interval: f64,
+    /// Tunnel MTU; the default fits a 1500-byte underlay such as inter-region peering
+    #[arg(long, default_value_t = 1476, requires = "registry")]
+    tunnel_mtu: u32,
     /// Write FRR configuration (default is dry-run)
     #[arg(long)]
     apply: bool,
@@ -315,7 +346,38 @@ fn mesh_options(args: MeshArgs) -> Result<mesh::Options> {
     if !(args.interval.is_finite() && args.interval >= 0.2) {
         return config_err("--interval must be at least 0.2 seconds");
     }
+    let overlay = match args.registry {
+        None => None,
+        Some(registry) => {
+            mesh::overlay::registry::parse_url(&registry)?;
+            if !(1..=8).contains(&args.relays) {
+                return config_err("--relays must be 1-8");
+            }
+            if !(args.registry_interval.is_finite() && args.registry_interval >= 10.0) {
+                return config_err("--registry-interval must be at least 10 seconds");
+            }
+            // Babel needs IPv6 link-local on each tunnel, so the IPv6 minimum applies.
+            if !(1280..=8977).contains(&args.tunnel_mtu) {
+                return config_err("--tunnel-mtu must be 1280-8977");
+            }
+            Some(mesh::overlay::Options {
+                registry,
+                registry_region: args.registry_region,
+                platform: match args.platform {
+                    Platform::Auto => mesh::overlay::PlatformChoice::Auto,
+                    Platform::Ec2 => mesh::overlay::PlatformChoice::Ec2,
+                    Platform::Metal => mesh::overlay::PlatformChoice::Metal,
+                },
+                site: args.site,
+                endpoint: args.endpoint,
+                relays: args.relays,
+                interval: args.registry_interval,
+                mtu: args.tunnel_mtu,
+            })
+        }
+    };
     Ok(mesh::Options {
+        overlay,
         filter,
         policy,
         socket_dir: args.vty_socket,
@@ -330,25 +392,37 @@ fn mesh_options(args: MeshArgs) -> Result<mesh::Options> {
 async fn mesh_command(operation: MeshOperation, args: MeshArgs) -> Result<()> {
     let options = mesh_options(args)?;
     let vtysh = Vtysh { runner: &SystemRunner, socket_dir: options.socket_dir.as_deref() };
+    if !matches!(operation, MeshOperation::Inventory | MeshOperation::RenderFrr | MeshOperation::Plan) {
+        return match operation {
+            MeshOperation::Withdraw if !options.apply => config_err("mesh withdraw requires --apply"),
+            MeshOperation::Withdraw => mesh::withdraw(options.socket_dir.as_deref()).await,
+            _ => mesh::run(options).await,
+        };
+    }
+    // Previews never apply: the overlay reads the registry without publishing and changes nothing.
+    let mut preview = mesh::Mesh::new(mesh::Options { apply: false, ..options.clone() }, std::sync::Arc::new(SystemRunner));
+    if let Some(overlay) = options.overlay.clone() {
+        preview = preview.with_overlay(mesh::overlay::system(overlay, &SystemRunner).await?);
+    }
+    let (inventory, desired, overlay_commands) = preview.preview().await?;
     match operation {
         MeshOperation::Inventory => {
-            let inventory = collect(&SystemRunner, &options.filter).await?;
-            println!("{}", serde_json::to_string_pretty(&inventory).unwrap_or_default());
+            let mut value = serde_json::to_value(&inventory).unwrap_or_default();
+            if let Some(overlay) = preview.overlay_snapshot() {
+                value["overlay"] = overlay;
+            }
+            println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
         }
-        MeshOperation::RenderFrr => {
-            let inventory = collect(&SystemRunner, &options.filter).await?;
-            print!("{}", mesh::frr::render(&mesh::frr::desired(&inventory, &options.policy)));
-        }
+        MeshOperation::RenderFrr => print!("{}", mesh::frr::render(&desired)),
         MeshOperation::Plan => {
-            let inventory = collect(&SystemRunner, &options.filter).await?;
-            let desired = mesh::frr::desired(&inventory, &options.policy);
+            for command in overlay_commands {
+                println!("{command}");
+            }
             for command in mesh::frr::plan(&desired, &vtysh.running().await?) {
                 println!("{command}");
             }
         }
-        MeshOperation::Run => mesh::run(options).await?,
-        MeshOperation::Withdraw if !options.apply => return config_err("mesh withdraw requires --apply"),
-        MeshOperation::Withdraw => mesh::withdraw(options.socket_dir.as_deref()).await?,
+        _ => unreachable!(),
     }
     Ok(())
 }

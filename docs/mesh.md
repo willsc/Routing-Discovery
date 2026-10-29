@@ -42,7 +42,7 @@ Filters are double-buffered: the daemon writes a complete `RDM-<IN|OUT>-V<4|6>-<
 
 ## Ownership
 
-This mode owns FRR's `router babel` `network` and `redistribute connected` lines, its four `distribute-list` lines, and every `RDM-*` prefix list. `network` lines for interfaces the inventory does not select are removed. On selected interfaces it sets `babel wired|wireless`, `babel hello-interval` and `babel update-interval`, and leaves other interface settings alone. Do not manage Babel by hand on the same FRR instance.
+This mode owns FRR's `router babel` `network` and `redistribute` lines, its four `distribute-list` lines, and every `RDM-*` prefix list. `network` lines for interfaces the inventory does not select are removed. On selected interfaces it sets `babel wired|wireless`, `babel hello-interval` and `babel update-interval`, and leaves other interface settings alone. Do not manage Babel by hand on the same FRR instance.
 
 If FRR's running config does not reflect a plan after it is applied, status stays unconverged and the same plan is not replayed until the inventory changes or FRR's state moves.
 
@@ -52,7 +52,7 @@ FRR babeld does not implement Babel HMAC authentication (RFC 8967). Any host tha
 
 ## Cloud networks
 
-AWS, Azure and GCP VPC fabrics do not forward link-local multicast, so Babel cannot form adjacencies directly across them. Build an overlay first (GRE, VXLAN or WireGuard tunnels with `multicast on` and an IPv6 link-local address), then let the mesh run over the tunnels. Automatic tunnel provisioning between discovered instances is not implemented yet.
+AWS, Azure and GCP VPC fabrics do not forward link-local multicast, so Babel cannot form adjacencies directly across them. With `--registry s3://bucket/prefix`, the mesh builds GRE tunnels between hosts and runs Babel over them; see [GRE overlay](overlay.md). On EC2, Babel then runs only on the tunnels.
 
 ## Commands
 
@@ -65,6 +65,8 @@ route-discovery mesh run --apply          # reconcile continuously
 route-discovery mesh withdraw --apply     # remove the babeld instance and RDM-* filters
 route-discovery status --url http://127.0.0.1:9810/status
 ```
+
+Overlay flags, all needing `--registry`: `--registry-region`, `--platform auto|ec2|metal`, `--site`, `--endpoint`, `--relays` (default 2), `--registry-interval` (default 60 s) and `--tunnel-mtu` (default 1476).
 
 Optional flags: `--include`/`--exclude GLOB` (repeatable), `--accept PREFIX` (repeatable; replaces the defaults), `--hello-interval-ms` (default 1000), `--update-interval-ms` (default 4000), `--vty-socket DIR`, `--interval` (seconds between passes, default 2), `--listen`, `--port` (default 9810) and `--state-dir`.
 

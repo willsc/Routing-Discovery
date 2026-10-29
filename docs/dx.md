@@ -1,6 +1,6 @@
 # Direct Connect router role
 
-`route-discovery dx run --apply` runs on the on-prem Linux router that terminates Direct Connect virtual interfaces. It reads this router's private and transit VIFs from the Direct Connect API, brings up their VLAN interfaces, and peers BGP with AWS on every one. Each session gets the ASNs, addresses and MD5 key AWS already holds for that VIF. The router's on-prem subnets are announced. AWS carries them to the virtual private gateway, Direct Connect gateway or Transit Gateway behind each VIF, and sends VPC and other AWS routes back.
+`route-discovery dx run --apply` runs on a Linux host outside AWS that terminates Direct Connect virtual interfaces itself, for example where a switch carries the VIF VLANs to it. Where carrier routers terminate the VIFs, this role is not needed; hosts reach AWS across the carrier and join the [GRE overlay](overlay.md) instead. It reads this router's private and transit VIFs from the Direct Connect API, brings up their VLAN interfaces, and peers BGP with AWS on every one. Each session gets the ASNs, addresses and MD5 key AWS already holds for that VIF. The router's on-prem subnets are announced. AWS carries them to the virtual private gateway, Direct Connect gateway or Transit Gateway behind each VIF, and sends VPC and other AWS routes back.
 
 ```mermaid
 flowchart LR

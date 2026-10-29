@@ -40,7 +40,7 @@ Every 15 seconds it does the following:
 | VPC route tables | Route Server propagates selected routes into associated tables. Use two or more instances announcing the same VIP for failover. BFD or BGP keepalive liveness withdraws a failed instance. |
 | Transit Gateway | Connect sessions receive the TGW route table's routes (other VPCs, VPN, Direct Connect gateway) and inject announced VIPs into it. |
 | VGW / Site-to-Site VPN | AWS-managed. Routes reach this instance through the TGW when the VPN is a TGW attachment. For a VGW on a VPC, enable route propagation on the tables; Route Server routes and VGW routes then coexist under AWS route priority rules. |
-| Direct Connect private VIF / transit VIF | AWS-managed, through the VGW or DX gateway and TGW. This mode does not run on the on-prem router that terminates the VIF. |
+| Direct Connect private VIF / transit VIF | AWS-managed, through the VGW or DX gateway and TGW. This mode does not run on whatever terminates the VIF. |
 | PrivateLink | Not routed. Interface endpoint IPs sit inside the consumer VPC CIDR and are reachable wherever that VPC CIDR is routed. VPCs with overlapping CIDRs cannot be joined by routing. |
 
 ## Self-registration

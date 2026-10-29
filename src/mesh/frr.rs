@@ -14,6 +14,8 @@ use crate::commands::{argv, Runner};
 use crate::error::{backend_err, Error, Result};
 
 pub const REDISTRIBUTE: [&str; 2] = ["redistribute ipv4 connected", "redistribute ipv6 connected"];
+/// Relays originate their VPC's CIDRs as kernel routes (see `overlay::underlay`).
+pub const REDISTRIBUTE_KERNEL: &str = "redistribute ipv4 kernel";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Direction {
@@ -75,6 +77,12 @@ pub struct Policy {
     pub accept: Vec<IpNet>,
     pub hello_interval_ms: u32,
     pub update_interval_ms: u32,
+    /// Never learned from neighbours: the VPC fabric carries this host's own VPC.
+    pub local: Vec<IpNet>,
+    /// Advertised exactly, in addition to connected subnets: a relay's VPC CIDRs.
+    pub originate: Vec<IpNet>,
+    /// Advertise nothing: a VPC host that is not a relay must not carry transit.
+    pub leaf: bool,
 }
 
 pub const DEFAULT_ACCEPT: &[&str] = &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"];
@@ -85,6 +93,9 @@ impl Default for Policy {
             accept: DEFAULT_ACCEPT.iter().map(|p| p.parse().unwrap()).collect(),
             hello_interval_ms: 1000,
             update_interval_ms: 4000,
+            local: vec![],
+            originate: vec![],
+            leaf: false,
         }
     }
 }
@@ -92,6 +103,7 @@ impl Default for Policy {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Desired {
     pub networks: BTreeSet<String>,
+    pub redistribute: BTreeSet<String>,
     pub filters: BTreeMap<Filter, Vec<String>>,
     pub interfaces: BTreeMap<String, Vec<String>>,
 }
@@ -101,10 +113,18 @@ pub fn desired(inventory: &Inventory, policy: &Policy) -> Desired {
     let mut filters: BTreeMap<Filter, Vec<String>> = FILTERS.iter().map(|f| (*f, vec![])).collect();
     for (direction, v) in FILTERS {
         let entries = filters.get_mut(&(direction, v)).unwrap();
+        if direction == Direction::Out && policy.leaf {
+            entries.push("deny any".into());
+            continue;
+        }
+        if direction == Direction::In {
+            entries.extend(policy.local.iter().filter(|n| version(n) == v).map(|n| format!("deny {}", spec(n, false))));
+        }
         if direction == Direction::Out {
             // Withheld subnets would otherwise leak through `redistribute connected` and the accept supernets.
             entries.extend(inventory.withheld.iter().filter(|n| version(n) == v).map(|n| format!("deny {}", spec(n, true))));
             entries.extend(published.iter().filter(|n| version(n) == v).map(|n| format!("permit {}", spec(n, true))));
+            entries.extend(policy.originate.iter().filter(|n| version(n) == v).map(|n| format!("permit {}", spec(n, true))));
         }
         entries.extend(policy.accept.iter().filter(|n| version(n) == v).map(|n| format!("permit {}", spec(n, false))));
         entries.push("deny any".into());
@@ -125,7 +145,11 @@ pub fn desired(inventory: &Inventory, policy: &Policy) -> Desired {
             (nic.name.clone(), lines)
         })
         .collect();
-    Desired { networks: inventory.nics.iter().map(|n| n.name.clone()).collect(), filters, interfaces }
+    let mut redistribute: BTreeSet<String> = REDISTRIBUTE.iter().map(|r| r.to_string()).collect();
+    if !policy.originate.is_empty() {
+        redistribute.insert(REDISTRIBUTE_KERNEL.to_string());
+    }
+    Desired { networks: inventory.nics.iter().map(|n| n.name.clone()).collect(), redistribute, filters, interfaces }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -190,7 +214,7 @@ pub fn parse_running(text: &str) -> Running {
             Some("router") => {
                 if let ["network", name] = words.as_slice() {
                     running.networks.insert(name.to_string());
-                } else if REDISTRIBUTE.contains(&line) {
+                } else if line.starts_with("redistribute ") {
                     running.redistribute.insert(line.to_string());
                 } else if let Some((filter, name)) = parse_filter(&words) {
                     running.active.insert(filter, name);
@@ -241,7 +265,8 @@ pub fn plan(desired: &Desired, running: &Running) -> Vec<String> {
             retire.push(format!("no {fam} prefix-list {name}"));
         }
     }
-    router.extend(REDISTRIBUTE.iter().filter(|r| !running.redistribute.contains(**r)).map(|r| r.to_string()));
+    router.extend(desired.redistribute.difference(&running.redistribute).cloned());
+    router.extend(running.redistribute.difference(&desired.redistribute).map(|r| format!("no {r}")));
     router.extend(desired.networks.difference(&running.networks).map(|n| format!("network {n}")));
     router.extend(running.networks.difference(&desired.networks).map(|n| format!("no network {n}")));
     let mut interfaces = vec![];
@@ -298,7 +323,7 @@ pub fn render(desired: &Desired) -> String {
     }
     lines.push("router babel".into());
     lines.extend(desired.networks.iter().map(|n| format!(" network {n}")));
-    lines.extend(REDISTRIBUTE.iter().map(|r| format!(" {r}")));
+    lines.extend(desired.redistribute.iter().map(|r| format!(" {r}")));
     lines.extend(FILTERS.iter().map(|f| format!(" {}", distribute(*f, &list_name(*f, 'A')))));
     lines.push("exit".into());
     lines.join("\n") + "\n"

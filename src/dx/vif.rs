@@ -79,8 +79,7 @@ pub struct Discovered {
 /// At most 13 bytes, within IFNAMSIZ. Each name depends only on its own parent, so the same VLAN can be
 /// used on redundant connections and adding a parent never renames existing links.
 pub fn link_name(parent: &str, vlan: u16) -> String {
-    // 32-bit FNV-1a, folded to 16 bits; fixed here so names don't change between releases.
-    let hash = parent.bytes().fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+    let hash = crate::hash::fnv1a(parent.as_bytes());
     format!("rddx{:04x}.{vlan}", (hash >> 16) ^ (hash & 0xffff))
 }
 

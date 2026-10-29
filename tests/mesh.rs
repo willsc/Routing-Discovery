@@ -184,6 +184,7 @@ fn mesh(running: String, apply: bool) -> (Mesh, Arc<Fake>) {
         port: 0,
         state_dir: std::env::temp_dir(),
         apply,
+        overlay: None,
     };
     (Mesh::new(options, fake.clone()), fake)
 }

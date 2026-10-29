@@ -9,14 +9,15 @@ publish = false
 
 [features]
 default = ["aws"]
-# AWS SDK clients: EC2 (bgp role) and Direct Connect (dx role).
-aws = ["dep:aws-config", "dep:aws-sdk-ec2", "dep:aws-sdk-directconnect"]
+# AWS SDK clients: EC2 (bgp role), Direct Connect (dx role) and S3 (mesh registry).
+aws = ["dep:aws-config", "dep:aws-sdk-ec2", "dep:aws-sdk-directconnect", "dep:aws-sdk-s3"]
 
 [dependencies]
 async-trait = "0.1"
 aws-config = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio", "credentials-process", "sso"] }
 aws-sdk-directconnect = { version = "1", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
 aws-sdk-ec2 = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
 clap = { version = "4", features = ["derive"] }
 fastrand = "2"
 futures = "0.3"
