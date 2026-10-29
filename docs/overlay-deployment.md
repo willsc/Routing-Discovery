@@ -18,7 +18,7 @@ Pilot layout:
 | VPC B | `b1`, `b2` started first, then `b3` | `b1`, `b2` relays; `b3` ordinary |
 | Outside AWS, reached over Direct Connect | `m1` | its own site and relay |
 
-## 1. Build
+## 1. Build and publish a release
 
 On a build machine with the same CPU architecture as the hosts and an OS no newer than theirs (glibc compatibility), with Rust 1.89 or later:
 
@@ -29,15 +29,35 @@ make test && make lint
 cargo build --release --locked       # target/release/route-discovery
 ```
 
+Once the registry bucket exists (2.1, with `$BUCKET` set), publish the build to it under `releases/<commit>/`. Every host installs from there, so all of them run exactly the same build:
+
+```bash
+COMMIT=$(git rev-parse --short HEAD)
+DEST=s3://$BUCKET/releases/$COMMIT
+cp target/release/route-discovery /tmp/route-discovery
+(cd /tmp && sha256sum route-discovery > route-discovery.sha256)
+aws s3 cp /tmp/route-discovery $DEST/route-discovery
+aws s3 cp /tmp/route-discovery.sha256 $DEST/route-discovery.sha256
+aws s3 cp deploy/route-discovery-mesh.service $DEST/route-discovery-mesh.service
+aws s3 cp deploy/install-mesh.sh $DEST/install-mesh.sh
+```
+
 ## 2. AWS setup (once)
 
-### 2.1 Registry bucket
+Set these for the rest of this section:
 
 ```bash
 BUCKET=my-mesh-registry      # pick a name
 PREFIX=pilot                 # one prefix per mesh; production gets its own
 REGION=eu-west-2
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+```
 
+### 2.1 Registry bucket
+
+The registry is nothing more than this bucket: each host writes `$PREFIX/hosts/<host>.json` and reads the others. There is no server to run.
+
+```bash
 aws s3api create-bucket --bucket $BUCKET --region $REGION \
   --create-bucket-configuration LocationConstraint=$REGION
 aws s3api put-public-access-block --bucket $BUCKET --public-access-block-configuration \
@@ -48,16 +68,66 @@ aws s3api put-bucket-lifecycle-configuration --bucket $BUCKET --lifecycle-config
              "Filter": {"Prefix": "'$PREFIX'/hosts/"}, "Expiration": {"Days": 1}}]}'
 ```
 
-Leave versioning off. If the bucket must be versioned, add a rule that expires noncurrent versions after 1 day.
+Leave versioning off. If the bucket must be versioned, add a rule that expires noncurrent versions after 1 day. Hosts outside AWS reach S3 over the internet or an S3 interface endpoint; they only need HTTPS to it.
 
-### 2.2 IAM
+Check it from your workstation: `aws s3 ls s3://$BUCKET/$PREFIX/hosts/` is empty until the first host starts with `--apply`.
 
-Copy [`deploy/mesh-aws-policy.json`](../deploy/mesh-aws-policy.json), replacing `REGISTRY_BUCKET` and `REGISTRY_PREFIX`, and create it as a policy.
+### 2.2 IAM policies
 
-- **EC2:** attach it to the instance profile role of every mesh instance. The SDK picks up the role through IMDS.
-- **Bare metal:** attach it to an IAM Roles Anywhere role, and set the host up with a certificate and `aws_signing_helper`. The credential setup is the same as for any on-prem workload: a `credential_process` profile in `/etc/route-discovery/aws-config`.
+```bash
+sed "s/REGISTRY_BUCKET/$BUCKET/; s#REGISTRY_PREFIX#$PREFIX#g" deploy/mesh-aws-policy.json > /tmp/mesh-policy.json
+sed "s/REGISTRY_BUCKET/$BUCKET/" deploy/mesh-release-policy.json > /tmp/mesh-release-policy.json
+aws iam create-policy --policy-name route-discovery-mesh --policy-document file:///tmp/mesh-policy.json
+aws iam create-policy --policy-name route-discovery-mesh-release --policy-document file:///tmp/mesh-release-policy.json
+MESH_POLICY=arn:aws:iam::$ACCOUNT:policy/route-discovery-mesh
+RELEASE_POLICY=arn:aws:iam::$ACCOUNT:policy/route-discovery-mesh-release
+```
 
-### 2.3 Network
+`route-discovery-mesh` is what the daemon needs at run time: list, read and write the registry prefix, nothing else. `route-discovery-mesh-release` lets the installer download releases.
+
+### 2.3 IAM for EC2 instances
+
+If your instances already have an instance profile, attach both policies to its role instead, and skip to the last command.
+
+```bash
+aws iam create-role --role-name route-discovery-mesh --assume-role-policy-document '{
+  "Version": "2012-10-17",
+  "Statement": [{"Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name route-discovery-mesh --policy-arn $MESH_POLICY
+aws iam attach-role-policy --role-name route-discovery-mesh --policy-arn $RELEASE_POLICY
+# For installing through Systems Manager (section 3.2):
+aws iam attach-role-policy --role-name route-discovery-mesh \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam create-instance-profile --instance-profile-name route-discovery-mesh
+aws iam add-role-to-instance-profile --instance-profile-name route-discovery-mesh --role-name route-discovery-mesh
+
+# Each existing instance:
+aws ec2 associate-iam-instance-profile --instance-id i-... --iam-instance-profile Name=route-discovery-mesh
+```
+
+The daemon finds these credentials through IMDS; there is nothing to configure on the host.
+
+### 2.4 IAM for bare-metal hosts (IAM Roles Anywhere)
+
+Bare-metal hosts get temporary credentials for the same policies by presenting an X.509 certificate from a CA you control. You need one CA certificate (`ca.pem`), and per host a certificate and key it signed (`m1.pem`, `m1.key`). The certificates need `digitalSignature` key usage and must not be CA certificates.
+
+```bash
+ANCHOR=$(aws rolesanywhere create-trust-anchor --name route-discovery-mesh --enabled \
+  --source "sourceType=CERTIFICATE_BUNDLE,sourceData={x509CertificateData=$(cat ca.pem)}" \
+  --query trustAnchor.trustAnchorArn --output text)
+sed "s#TRUST_ANCHOR_ARN#$ANCHOR#" deploy/mesh-rolesanywhere-trust.json > /tmp/trust.json
+aws iam create-role --role-name route-discovery-mesh-metal --assume-role-policy-document file:///tmp/trust.json
+aws iam attach-role-policy --role-name route-discovery-mesh-metal --policy-arn $MESH_POLICY
+aws iam attach-role-policy --role-name route-discovery-mesh-metal --policy-arn $RELEASE_POLICY
+ROLE=arn:aws:iam::$ACCOUNT:role/route-discovery-mesh-metal
+PROFILE=$(aws rolesanywhere create-profile --name route-discovery-mesh --enabled --role-arns $ROLE \
+  --query profile.profileArn --output text)
+echo "$ANCHOR $PROFILE $ROLE"     # needed on every bare-metal host
+```
+
+Section 3.1 sets up each bare-metal host to use these.
+
+### 2.5 Network
 
 Every host's endpoint must reach the endpoint of every host it tunnels to, without the overlay. These are the underlay paths:
 
@@ -76,78 +146,111 @@ done
 
 The ICMP rule lets "fragmentation needed" messages through, which path MTU discovery needs. If you use network ACLs, allow protocol 47 both ways. Outside AWS, firewalls and carrier ACLs must pass GRE between bare-metal hosts and the VPC CIDRs.
 
-Turn off source/destination check on every mesh instance, since any of them can become a relay:
+Turn off source/destination check on every mesh instance, since any of them can become a relay. For every instance tagged `route-discovery=mesh`:
 
 ```bash
-aws ec2 modify-instance-attribute --instance-id i-... --no-source-dest-check
+for ID in $(aws ec2 describe-instances --filters Name=tag:route-discovery,Values=mesh Name=instance-state-name,Values=running \
+              --query 'Reservations[].Instances[].InstanceId' --output text); do
+  aws ec2 modify-instance-attribute --instance-id $ID --no-source-dest-check
+done
 ```
 
-## 3. Host setup (every host)
+For new instances, run the loop again after launch, or have your provisioning tool do it (Terraform `source_dest_check = false`, CloudFormation `SourceDestCheck: false`).
 
-Commands assume Ubuntu 24.04; Debian 12 is the same.
+## 3. Install the daemon on every host
 
-### 3.1 Kernel
+[`deploy/install-mesh.sh`](../deploy/install-mesh.sh) does the whole host setup, on Debian 12 and Ubuntu 22.04/24.04. It is safe to re-run, which is also how you upgrade:
 
-```bash
-printf 'ip_gre\ngre\n' | sudo tee /etc/modules-load.d/route-discovery.conf
-sudo modprobe -a ip_gre gre
+1. loads `ip_gre` and `gre` at boot, and sets forwarding and loose reverse-path filtering;
+2. installs FRR 10 from the FRR apt repository, holds its version, and enables babeld;
+3. creates the `route-discovery` user, in the `frrvty` group;
+4. downloads the binary, checks its SHA-256, and installs it at `/usr/local/bin/route-discovery`;
+5. installs the systemd unit and writes `/etc/default/route-discovery-mesh` with the flags;
+6. with `--start`, enables and (re)starts the service. Without it, it stops there, so you can preview first.
 
-sudo tee /etc/sysctl.d/90-route-discovery.conf <<'EOF'
-net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
-# Loose reverse-path filtering: overlay paths can be asymmetric.
-net.ipv4.conf.all.rp_filter = 2
-net.ipv4.conf.default.rp_filter = 2
-net.ipv6.conf.all.disable_ipv6 = 0
-EOF
-sudo sysctl --system
-```
+It needs the AWS CLI on the host to download from `s3://`; Amazon Linux has it, on Ubuntu use `snap install aws-cli --classic`. Alternatively, pass a local path or an `https://` URL as `--binary`.
 
-The modules are loaded at boot because the service runs with `ProtectKernelModules=true`.
-
-If a host firewall is active, allow GRE in, and Babel (UDP 6696) on tunnel interfaces, for example with nftables:
+If a host firewall is active, also allow GRE in, and Babel (UDP 6696) on tunnel interfaces, for example with nftables:
 
 ```
 ip protocol gre accept
 iifname "rdm*" udp dport 6696 accept
 ```
 
-### 3.2 FRR
+Keep `router babel` out of `/etc/frr/frr.conf`: the mesh owns it. The installer warns if it finds one.
+
+### 3.1 One host by hand
 
 ```bash
-curl -s https://deb.frrouting.org/frr/keys.gpg | sudo tee /usr/share/keyrings/frrouting.gpg >/dev/null
-echo "deb [signed-by=/usr/share/keyrings/frrouting.gpg] https://deb.frrouting.org/frr $(lsb_release -sc) frr-10" \
-  | sudo tee /etc/apt/sources.list.d/frr.list
-sudo apt update && sudo apt install -y frr
-sudo apt-mark hold frr                     # use the same version everywhere
-sudo sed -i 's/^babeld=no/babeld=yes/' /etc/frr/daemons
-sudo systemctl restart frr
-```
+REL=s3://$BUCKET/releases/$COMMIT
+aws s3 cp $REL/install-mesh.sh . && chmod +x install-mesh.sh
 
-Keep `router babel` out of `/etc/frr/frr.conf`: the mesh owns it.
-
-### 3.3 route-discovery
-
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin --groups frrvty route-discovery
-sudo install -m 0755 route-discovery /usr/local/bin/route-discovery
-sudo install -m 0644 deploy/route-discovery-mesh.service /etc/systemd/system/
-sudo systemctl daemon-reload
-```
-
-`/etc/default/route-discovery-mesh` (mode 0640, owner `root:route-discovery`):
-
-```bash
 # EC2
-MESH_ARGS="--registry s3://my-mesh-registry/pilot --registry-region eu-west-2"
-
-# Bare metal: also the Roles Anywhere profile
-# AWS_CONFIG_FILE=/etc/route-discovery/aws-config
-# AWS_PROFILE=mesh
-# MESH_ARGS="--registry s3://my-mesh-registry/pilot --registry-region eu-west-2 --platform metal"
+sudo ./install-mesh.sh --registry s3://$BUCKET/$PREFIX --region $REGION --binary $REL/route-discovery
 ```
 
-On bare metal, add `--endpoint <address>` if the source address of the default path isn't the one the VPCs route back to. Add `--exclude` for NICs whose subnets must not be announced, such as a management network.
+On bare metal, first install [`aws_signing_helper`](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/credential-helper.html) at `/usr/local/bin/aws_signing_helper`, and copy `install-mesh.sh`, `route-discovery-mesh.service` and the binary to the host from the release (the host has no AWS credentials yet). Then, with `$ANCHOR`, `$PROFILE` and `$ROLE` from 2.4:
+
+```bash
+# The profile the daemon will use. It holds no secrets.
+cat > aws-config <<EOF
+[profile mesh]
+region = $REGION
+credential_process = /usr/local/bin/aws_signing_helper credential-process --certificate /etc/route-discovery/mesh.pem --private-key /etc/route-discovery/mesh.key --trust-anchor-arn $ANCHOR --profile-arn $PROFILE --role-arn $ROLE
+EOF
+
+# Creates the route-discovery user and copies aws-config to /etc/route-discovery/.
+sudo ./install-mesh.sh --registry s3://$BUCKET/$PREFIX --region $REGION --binary ./route-discovery \
+  --platform metal --aws-profile mesh --aws-config ./aws-config
+
+# This host's certificate and key, readable by the service only
+sudo install -m 0640 -g route-discovery m1.pem /etc/route-discovery/mesh.pem
+sudo install -m 0640 -g route-discovery m1.key /etc/route-discovery/mesh.key
+
+# Check: should print the route-discovery-mesh-metal role
+sudo -u route-discovery env AWS_CONFIG_FILE=/etc/route-discovery/aws-config AWS_PROFILE=mesh aws sts get-caller-identity
+```
+
+Once the host has credentials, upgrades can use `--binary s3://…` like EC2.
+
+On bare metal, add `--endpoint <address>` if the source address of the default path isn't the one the VPCs route back to, and `--extra "--exclude mgmt0"` for NICs whose subnets must not be announced, such as a management network.
+
+### 3.2 Existing EC2 instances, through Systems Manager
+
+For every running instance tagged `route-discovery=mesh` (the SSM agent must be running, as it is on Amazon Linux and Ubuntu AMIs):
+
+```bash
+aws ssm send-command --document-name AWS-RunShellScript \
+  --targets Key=tag:route-discovery,Values=mesh \
+  --max-concurrency 10% --max-errors 1 \
+  --parameters commands="[
+    \"command -v aws || snap install aws-cli --classic\",
+    \"aws s3 cp s3://$BUCKET/releases/$COMMIT/install-mesh.sh /root/install-mesh.sh\",
+    \"bash /root/install-mesh.sh --registry s3://$BUCKET/$PREFIX --region $REGION --binary s3://$BUCKET/releases/$COMMIT/route-discovery\"
+  ]"
+aws ssm list-command-invocations --command-id <id> --details --query 'CommandInvocations[].[InstanceId,Status]'
+```
+
+This installs without starting, so the bring-up order in section 5 still applies. To start a batch afterwards, run the same command with `systemctl enable --now route-discovery-mesh`. Upgrading later is the same command with a new `$COMMIT` and `--start`; `--max-concurrency` keeps most hosts routing while it rolls.
+
+### 3.3 New EC2 instances, through a launch template
+
+Add this as user data to the launch template or Auto Scaling group, with the `route-discovery-mesh` instance profile. New instances join as ordinary hosts once the relays exist, so they can start straight away:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+command -v aws || snap install aws-cli --classic
+REL=s3://my-mesh-registry/releases/<commit>
+aws s3 cp $REL/install-mesh.sh /root/install-mesh.sh
+bash /root/install-mesh.sh --registry s3://my-mesh-registry/pilot --region eu-west-2 --binary $REL/route-discovery --start
+```
+
+Source/destination check still has to be turned off on each new instance (see 2.5).
+
+### 3.4 Bare-metal fleets
+
+Use whatever already manages those hosts (Ansible, Salt, Puppet) to repeat the bare-metal steps from 3.1: the signing helper, `aws-config`, `install-mesh.sh` with the bare-metal flags, then the host's own certificate and key. `aws-config` is the same on every host; each host needs its own certificate.
 
 ## 4. Preview (changes nothing)
 

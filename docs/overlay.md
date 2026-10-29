@@ -68,6 +68,8 @@ Endpoint routes are refreshed every pass (2 s), so they follow underlay changes,
 
 ## Prerequisites
 
+The [deployment runbook](overlay-deployment.md) sets all of this up, step by step, with [`deploy/install-mesh.sh`](../deploy/install-mesh.sh) doing the per-host part.
+
 On every host:
 
 - FRR with `babeld=yes`, and `zebra` running.
@@ -118,5 +120,5 @@ On top of what the [mesh](mesh.md) owns, the overlay owns interfaces named `rdm*
 
 - IPv6 tunnel endpoints.
 - Encrypted tunnels.
-- Letting non-mesh resources in a VPC (for example RDS) reach other sites first. They can be reached from other sites, because relays advertise the whole VPC, but their VPC route tables don't point anywhere in the overlay. The `bgp` role with VPC Route Server could add those routes.
+- Letting non-mesh resources in a VPC (for example RDS) reach other sites first. They can be reached from other sites, because relays advertise the whole VPC, but their VPC route tables don't point anywhere in the overlay. Fixing that would mean writing VPC route table entries for other sites' prefixes that point at a relay's network interface, and moving them when relays change.
 - Several sites sharing one bare-metal LAN without `--site`.

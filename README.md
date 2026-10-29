@@ -4,6 +4,8 @@ Zero-configuration routing for hosts in AWS and outside it. There are no routing
 
 ![How the overlay hangs together: who tunnels to whom, the registry and reconcile loops, how a packet leaves through a tunnel, and failover when a Direct Connect path fails](docs/images/overlay.svg)
 
+To set up the registry and install the daemon on your hosts, see the [deployment runbook](docs/overlay-deployment.md).
+
 | Role | Runs on | Discovers from | Speaks | Announces |
 | --- | --- | --- | --- | --- |
 | [`mesh`](docs/mesh.md) | Every host, EC2 or bare metal | Local NICs (`ip -json addr`); with `--registry`, IMDS and the [S3 registry](docs/overlay.md) | Babel, over GRE tunnels between sites | EC2 relays: their VPC's CIDRs. Bare metal: connected subnets. Container and bridge subnets are withheld |
@@ -64,6 +66,8 @@ route-discovery status --url http://127.0.0.1:9811/status   # bgp; dx is 9812, m
 The only inputs are optional flags for things a host can't discover: the registry bucket (`--registry`), which physical port a Direct Connect connection uses (`--parent`), which ASN to register with (`--register-asn`), and interface include/exclude globs. Each role's guide lists them.
 
 ## Install as a service
+
+**For the mesh overlay on many hosts, follow the [deployment runbook](docs/overlay-deployment.md)**: it creates the S3 registry and IAM roles (including IAM Roles Anywhere for bare metal), and installs the daemon with [`deploy/install-mesh.sh`](deploy/install-mesh.sh) by hand, through Systems Manager, or from a launch template. The steps below are the manual equivalent for any role.
 
 1. Install FRR and enable the daemons the role needs:
    - `bgp` and `dx`: `bgpd` and `bfdd`, plus `frr-reload.py` (shipped with FRR as `/usr/lib/frr/frr-reload.py`).
