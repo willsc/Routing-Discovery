@@ -4,23 +4,7 @@
 
 Babel normally finds neighbours with link-local multicast, which VPCs, peering and the AWS backbone don't carry. Tunnels give every adjacency a point-to-point link that does.
 
-```mermaid
-flowchart LR
-    subgraph A["VPC A (site)"]
-        A1["relay"] --- A2["relay"]
-        AM1["host"] -.-> A1 & A2
-        AM2["host"] -.-> A1 & A2
-    end
-    subgraph B["VPC B (site)"]
-        B1["relay"] --- B2["relay"]
-        BM["host"] -.-> B1 & B2
-    end
-    M["bare-metal host<br/>(its own site and relay)"]
-    A1 & A2 == "GRE over VPC peering" === B1 & B2
-    M == "GRE over Direct Connect / leased line" === A1 & A2
-    M == "GRE over Direct Connect / leased line" === B1 & B2
-    S3[(S3 registry)] -. "every host publishes and reads" .- A & B & M
-```
+![How the overlay hangs together: who tunnels to whom, the registry and reconcile loops, how a packet leaves through a tunnel, and failover when a Direct Connect path fails](images/overlay.svg)
 
 ## How hosts find each other
 
@@ -62,9 +46,14 @@ A relay originates its VPC's CIDRs as kernel routes via the VPC router (route pr
 
 When a leased line or Direct Connect path fails, the tunnels whose packets used it stop passing hellos. Babel drops those neighbours after a few missed hellos (seconds at the default 1 s interval) and switches to the best path that remains. For example, bare metal → VPC B's relay → VPC A's relay over peering. Because the traffic is GRE between hosts, peering only ever carries host-to-host packets, so the restriction that peering won't pass traffic through a VPC doesn't apply.
 
+
 If a relay fails, the site's hosts still have tunnels to the other relay, so nothing waits for a new relay to be chosen. A replacement is picked once the dead relay misses 5 heartbeats (5 minutes by default).
 
 If S3 is unreachable, the overlay keeps its current tunnels and routes, and reports the error in status. The registry only matters when hosts join, leave or change.
+
+## Two loops
+
+The registry sync decides who this host tunnels to. The reconcile pass makes the kernel and FRR match, and repairs drift such as an FRR restart within one pass. Failover waits for neither: Babel does it between passes.
 
 ## Keeping tunnel packets on the underlay
 
@@ -73,6 +62,7 @@ Babel learns routes that cover tunnel endpoints: a remote VPC's CIDR covers its 
 - an `ip rule` at priority 4242 sends locally generated GRE packets (IP protocol 47) to routing table 4242;
 - table 4242 holds one `/32` per tunnel endpoint, copied from the best main-table route that is neither a Babel route nor via a tunnel;
 - if there is no such route, the entry is `unreachable`. The tunnel stays quiet and Babel routes around it, instead of tunnelling through itself.
+
 
 Endpoint routes are refreshed every pass (2 s), so they follow underlay changes, for example when the carrier moves a VPC's route to another Direct Connect connection.
 

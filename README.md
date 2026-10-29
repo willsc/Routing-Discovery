@@ -2,19 +2,7 @@
 
 Zero-configuration routing for hosts in AWS and outside it. There are no routing configuration files and no edge router. Every host runs the daemon: it discovers its interfaces, addresses and peers from the host, from AWS and from a shared S3 registry, then drives [FRR](https://frrouting.org), which speaks Babel, BGP and BFD. Hosts build GRE tunnels to each other across VPC peering, Direct Connect and leased lines and run Babel over them, so when a path fails, routing on the hosts reconfigures itself.
 
-```mermaid
-flowchart LR
-    subgraph VA["VPC A"]
-        A1["relays<br/><b>mesh</b>"] --- AH["hosts<br/><b>mesh</b>"]
-    end
-    subgraph VB["VPC B"]
-        B1["relays<br/><b>mesh</b>"] --- BH["hosts<br/><b>mesh</b>"]
-    end
-    M["bare-metal hosts<br/><b>mesh</b>"]
-    A1 == "GRE over VPC peering" === B1
-    M == "GRE over Direct Connect<br/>(carrier routers, leased lines)" === A1 & B1
-    S3[(S3 registry)] -.- VA & VB & M
-```
+![How the overlay hangs together: who tunnels to whom, the registry and reconcile loops, how a packet leaves through a tunnel, and failover when a Direct Connect path fails](docs/images/overlay.svg)
 
 | Role | Runs on | Discovers from | Speaks | Announces |
 | --- | --- | --- | --- | --- |
